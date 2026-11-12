@@ -20,6 +20,24 @@ import { integrateBicycle } from './advancedVehicleDynamics.ts';
 import { assessAeb, safetyDriveModifiers, hasVerifiedSystem } from './vehicleSafetySystems.ts';
 import { makeRoadPath, type CurvedRoadPath } from './curvedRoadPath.ts';
 import { emptyDrivingEvents, type DrivingEventStats } from './drivingIQ.ts';
+import {
+  DOUBLE_YELLOW_X,
+  FORWARD_LANE_OPTIONS,
+  buildSpeedLimitZones,
+  buildTrafficLights,
+  createOncomingTrafficPool,
+  evaluateBlindSpotFlanks,
+  findUpcomingTrafficLight,
+  getActiveSpeedLimitZone,
+  getTrafficLightState,
+  stepOncomingTraffic,
+  type BlindSpotFlankState,
+  type OncomingTrafficCar,
+  type SpeedLimitZone,
+  type TrafficLightNode,
+  type TrafficRuleNotice,
+  type WetSplashEvent,
+} from './urbanTrafficRules.ts';
 
 const GRAVITY = 9.80665;
 const AIR_DENSITY = 1.225;
@@ -98,10 +116,33 @@ export interface DynamicCar {
   history: SimulationTelemetrySample[];
 }
 
+export interface InteractivePhysicsOptions {
+  urbanTrafficRules?: boolean;
+}
+
 export class InteractiveRacePhysics {
   public readonly cars: DynamicCar[];
   public hazards: TrackHazard[] = [];
   public readonly speedBumps: SpeedBump[];
+  public readonly urbanRulesEnabled: boolean;
+  public readonly trafficLights: TrafficLightNode[];
+  public readonly speedZones: SpeedLimitZone[];
+  public readonly oncomingCars: OncomingTrafficCar[];
+  public seatbeltBuckled = false;
+  public lastTrafficNotice: TrafficRuleNotice | null = null;
+  public lastWetSplash: WetSplashEvent | null = null;
+  private noticeSeq = 0;
+  private splashSeq = 0;
+  private seatbeltReminderSent = false;
+  private seatbeltPenaltyApplied = false;
+  private unbuckledMovingSec = 0;
+  private penalizedRedLights = new Set<string>();
+  private overspeedSec = 0;
+  private underspeedSec = 0;
+  private wrongWaySec = 0;
+  private lastSpeedPenaltyAt = -99;
+  private lastWrongWayPenaltyAt = -99;
+  private prevPlayerZ = 0;
   public time = 0;
   public playerId: string;
   private nextHazardId = 1;
@@ -119,42 +160,114 @@ export class InteractiveRacePhysics {
     this.waterZones = getWaterZones(mode, this.track.distanceMeters, this.track.routeHazardProfile);
   }
 
-  constructor(vehicles: Vehicle[], track: RaceTrackConfig, playerId: string, seedHazards = true) {
+  setSeatbeltBuckled(buckled: boolean) {
+    if (this.seatbeltBuckled === buckled) return;
+    this.seatbeltBuckled = buckled;
+    if (buckled) {
+      this.unbuckledMovingSec = 0;
+      this.pushNotice('ok', 'seatbelt_ok', '✓ CINTURÓN ABROCHADO', 'Conducción segura activada · sin penalización', 0);
+    }
+  }
+
+  private pushNotice(
+    kind: TrafficRuleNotice['kind'],
+    code: TrafficRuleNotice['code'],
+    title: string,
+    subtitle: string,
+    pointsDelta: number,
+  ) {
+    this.lastTrafficNotice = {
+      seq: ++this.noticeSeq,
+      kind,
+      code,
+      title,
+      subtitle,
+      pointsDelta,
+      createdAtSec: this.time,
+    };
+  }
+
+  getBlindSpotState(vehicleId = this.playerId): BlindSpotFlankState {
+    const own = this.getCar(vehicleId);
+    if (!own) {
+      return { equipped: false, leftAlert: false, rightAlert: false, leftDistanceM: null, rightDistanceM: null };
+    }
+    return evaluateBlindSpotFlanks(
+      own.vehicle,
+      own.x,
+      own.z,
+      this.cars,
+      this.oncomingCars,
+      own.id,
+    );
+  }
+
+  getActiveSpeedZone(z: number): SpeedLimitZone {
+    return getActiveSpeedLimitZone(this.speedZones, z);
+  }
+
+  getUpcomingTrafficLight(z: number, lookaheadM = 135) {
+    return findUpcomingTrafficLight(this.trafficLights, z, this.time, lookaheadM);
+  }
+
+  constructor(
+    vehicles: Vehicle[],
+    track: RaceTrackConfig,
+    playerId: string,
+    seedHazards = true,
+    options?: InteractivePhysicsOptions,
+  ) {
     this.track = track;
     this.roadPath = makeRoadPath(track);
     this.playerId = playerId;
+    this.urbanRulesEnabled = Boolean(options?.urbanTrafficRules);
+    this.trafficLights = this.urbanRulesEnabled ? buildTrafficLights(track) : [];
+    this.speedZones = this.urbanRulesEnabled ? buildSpeedLimitZones(track) : [];
+    this.oncomingCars = this.urbanRulesEnabled ? createOncomingTrafficPool(track) : [];
     this.speedBumps = track.cityCircuitId ? getAsuncionStreetDetails(track.routeHazardProfile, track.distanceMeters).speedBumps : [];
     const laneWidth = 3.6;
     const offset = (vehicles.length - 1) * laneWidth * 0.5;
-    this.cars = vehicles.map((v, i) => ({
-      id: v.id, vehicle: v,
-      x: i * laneWidth - offset, z: 0, yaw: 0, speed: 0, lateralSpeed: 0,
-      yawRate: 0, lateralAccelMps2: 0, tyreGripUse: 0, frontNormalN: 0, rearNormalN: 0, sideSlipRad: 0, steer: 0, acceleration: 0, turboBoost: 0, effectiveThrottle:0, batterySoc:.68, engineRpm: 850, deliveredPowerHp: 0, braking: false, brakeIntensity: 0, absActive: false, brakeSlip: 0, wheelLock: 0, tcsActive:false, escActive:false, aebActive:false, fcwWarning:false, laneDepartureWarning:false, hillHoldRemaining:0, slip: 0,
-      pothole: false, bump: 0, suspension: new FourCornerSuspension().pose, speedBumpActiveId: null, damage: 0, impacts: 0, drivingEvents: emptyDrivingEvents(),
-      previousPothole:false, previousWater:false, previousLossOfControl:false,
-      previousAbs:false, previousTcs:false, previousEsc:false, previousAeb:false,
-      bestSpeed: 0,
-      finishedAt: null, laneX: i * laneWidth - offset,
-      aiTargetX: i * laneWidth - offset, aiAvoidUntilZ: 0, aiStationarySeconds:0, aiRecoverySeconds:0, history: [],
-    }));
+    // En modo urbano de doble mano, la grilla ocupa los carriles derechos (-X .. +0.35),
+    // dejando libre la mano contraria (X > +1.65) para los autos que vienen de frente.
+    const urbanStartSlots = [-4.35, -2.25, -0.20, -5.25];
+    this.cars = vehicles.map((v, i) => {
+      const startX = this.urbanRulesEnabled
+        ? urbanStartSlots[i % urbanStartSlots.length]
+        : i * laneWidth - offset;
+      return {
+        id: v.id, vehicle: v,
+        x: startX, z: 0, yaw: 0, speed: 0, lateralSpeed: 0,
+        yawRate: 0, lateralAccelMps2: 0, tyreGripUse: 0, frontNormalN: 0, rearNormalN: 0, sideSlipRad: 0, steer: 0, acceleration: 0, turboBoost: 0, effectiveThrottle:0, batterySoc:.68, engineRpm: 850, deliveredPowerHp: 0, braking: false, brakeIntensity: 0, absActive: false, brakeSlip: 0, wheelLock: 0, tcsActive:false, escActive:false, aebActive:false, fcwWarning:false, laneDepartureWarning:false, hillHoldRemaining:0, slip: 0,
+        pothole: false, bump: 0, suspension: new FourCornerSuspension().pose, speedBumpActiveId: null, damage: 0, impacts: 0, drivingEvents: emptyDrivingEvents(),
+        previousPothole:false, previousWater:false, previousLossOfControl:false,
+        previousAbs:false, previousTcs:false, previousEsc:false, previousAeb:false,
+        bestSpeed: 0,
+        finishedAt: null, laneX: startX,
+        aiTargetX: startX, aiAvoidUntilZ: 0, aiStationarySeconds:0, aiRecoverySeconds:0, history: [],
+      };
+    });
     for (const car of this.cars) this.suspensionSolvers.set(car.id, new FourCornerSuspension());
-    if (seedHazards && track.distanceMeters <= 3500) this.populateHazards();
+    const maxSeedDist = track.cityCircuitId ? 7800 : 3500;
+    if (seedHazards && track.distanceMeters <= maxSeedDist) this.populateHazards();
     this.recordTelemetry();
   }
 
   addHazard(kind: HazardKind, x: number, z: number): TrackHazard | null {
     if (z <= 12 || z >= this.track.distanceMeters - 10) return null;
     const radius = kind === 'pothole' ? 1.12 : 0.83;
-    const next: TrackHazard = { id: this.nextHazardId++, kind, x: clamp(x, -5.7, 5.7), z, radius };
-    // No crear piezas superpuestas entre sí.
+    const maxRightHandX = this.urbanRulesEnabled ? 0.65 : 5.7;
+    const next: TrackHazard = { id: this.nextHazardId++, kind, x: clamp(x, -5.7, maxRightHandX), z, radius };
+    // No crear piezas superpuestas entre sí ni sobre líneas de detención de semáforo.
     if (this.hazards.some(h => Math.hypot(h.x - next.x, h.z - next.z) < h.radius + radius + 2)) return null;
     if (this.speedBumps.some(b => Math.abs(b.z - z) < 4)) return null;
+    if (this.trafficLights.some(tl => Math.abs((tl.z - 5.5) - z) < 15)) return null;
     this.hazards.push(next);
     return next;
   }
 
   private populateHazards() {
     const max = this.track.distanceMeters;
+    const laps = Math.max(1, this.track.laps ?? 1);
     const profile = this.track.routeHazardProfile;
     const config = {
       craters: { spacing: 34, barrierEvery: 5, xShift: 1 },
@@ -164,9 +277,11 @@ export class InteractiveRacePhysics {
       cobbles: { spacing: 56, barrierEvery: 5, xShift: 1 },
       traffic: { spacing: 105, barrierEvery: 1, xShift: 2 },
     }[profile || 'chains'];
-    const number = Math.min(24, Math.max(2, Math.floor((max - 60) / config.spacing)));
+    const number = Math.min(24 * laps, Math.max(2, Math.floor((max - 60) / config.spacing)));
     const spacing = (max - 80) / number;
-    const xs = [-3.6, 0, 3.6, -1.8, 1.8];
+    const xs = this.urbanRulesEnabled
+      ? [-4.6, -2.7, -0.9, 0.35, -3.7]
+      : [-3.6, 0, 3.6, -1.8, 1.8];
     for (let i = 0; i < number; i++) {
       const z = 40 + i * spacing;
       if (z >= max - 14) break;
@@ -192,7 +307,9 @@ export class InteractiveRacePhysics {
     const upcoming = this.hazards.filter(h => h.z > car.z - 3 && h.z < car.z + lookAhead);
     const nearbyCars = this.cars.filter(other => other !== car && other.finishedAt === null &&
       other.z > car.z - 3 && other.z < car.z + lookAhead);
-    const options = [-5.0, -3.6, -1.6, 0, 1.6, 3.6, 5.0];
+    const options: readonly number[] = this.urbanRulesEnabled
+      ? FORWARD_LANE_OPTIONS
+      : [-5.0, -3.6, -1.6, 0, 1.6, 3.6, 5.0];
     let bestX = car.laneX;
     let bestScore = Infinity;
     for (const x of options) {
@@ -205,7 +322,7 @@ export class InteractiveRacePhysics {
       }
       for (const other of nearbyCars) {
         const distZ = Math.max(0, other.z - car.z);
-        if (Math.abs(x - other.x) < 2.5) score += 240 / (1 + distZ * 0.05);
+        if (Math.abs(x - other.x) < 2.35) score += 260 / (1 + distZ * 0.05);
       }
       // Los rivales intentan evitar charcos donde existe otro corredor libre.
       for (const water of this.waterZones) {
@@ -224,15 +341,47 @@ export class InteractiveRacePhysics {
     }
     const desiredHeading = Math.atan2(car.aiTargetX - car.x, Math.max(7, Math.abs(car.speed) * .43));
     const headingError = clamp(desiredHeading - car.yaw, -0.35, 0.35);
-    // Feed-forward por la curvatura física + corrección de carril. Sin esto
-    // el bot intentaría ir recto y sólo corregiría tras salirse de la curva.
+    // Feed-forward por la curvatura física + corrección de carril.
     const profile = getVehicleDynamicsProfile(car.vehicle, this.track.cargoPayloadKg, car.speed);
     const curveFeedForward = Math.atan(profile.wheelbaseM * this.roadPath.curvature(car.z)) /
       Math.max(.12, profile.maxSteerRad);
     const steer = clamp(curveFeedForward +
       (headingError * 4.2 / Math.max(5, Math.abs(car.speed) * 0.37)) / 0.42, -1, 1);
-    // Si el rival no alcanzó a apartarse de un peligro, frena de manera preventiva.
-    // No le otorgamos inmunidad: continúa usando las mismas ruedas y frenos.
+
+    // Respeto estricto de semáforos y límites de velocidad por los rivales IA en modo urbano
+    let redLightHold = false;
+    let redLightBrake = 0;
+    let speedLimitThrottleCap = .92;
+    let speedLimitBrake = 0;
+    if (this.urbanRulesEnabled) {
+      const nextLight = findUpcomingTrafficLight(this.trafficLights, car.z, this.time, 62);
+      if (nextLight && nextLight.phase !== 'green' && nextLight.distanceToStopM >= -1.2) {
+        const dist = Math.max(0, nextLight.distanceToStopM - 1.2);
+        if (dist <= 2.4) {
+          redLightHold = true;
+          redLightBrake = car.speed > 0.15 ? 0.92 : 0.55;
+        } else {
+          const safeSpeedMps = Math.sqrt(2 * 4.5 * dist);
+          if (car.speed > safeSpeedMps) {
+            redLightHold = true;
+            redLightBrake = clamp((car.speed - safeSpeedMps) / 8 + 0.35, 0.32, 0.95);
+          } else if (nextLight.phase === 'red' && dist < 14) {
+            speedLimitThrottleCap = 0.18;
+          }
+        }
+      }
+      const zone = getActiveSpeedLimitZone(this.speedZones, car.z);
+      const kmh = Math.abs(car.speed) * 3.6;
+      if (kmh > zone.maxKmh - 1.0) {
+        speedLimitThrottleCap = 0;
+        if (kmh > zone.maxKmh + 2.0) {
+          speedLimitBrake = clamp((kmh - zone.maxKmh) / 28, 0.14, 0.55);
+        }
+      } else if (kmh > zone.maxKmh - 6) {
+        speedLimitThrottleCap = Math.min(speedLimitThrottleCap, 0.42);
+      }
+    }
+
     const nearSolidObstacle = upcoming.some(h => h.kind === 'barrier' &&
       h.z > car.z && h.z - car.z < Math.max(20, Math.abs(car.speed) * 1.9) &&
       Math.abs(h.x - car.x) < h.radius + car.vehicle.dimensions.widthMm / 2000 + .7);
@@ -243,11 +392,28 @@ export class InteractiveRacePhysics {
     const approachingWater = this.waterZones.some(w => w.z > car.z && w.z - car.z < Math.max(14, car.speed * 1.5) && Math.abs(car.x - w.x) < w.radiusX + 1);
     const wetSlowdown = approachingWater && car.speed * 3.6 > (this.weather === 'flood' ? 28 : 52);
     const threat = upcoming.some(h => h.kind === 'barrier' && h.z - car.z < Math.max(10, car.speed * 1.0) &&
-      Math.abs(h.x - car.x) < h.radius + 1.15) || nearbyCars.some(o => o.z - car.z < Math.max(9, car.speed * 0.55) && Math.abs(o.x - car.x) < 2.1);
+      Math.abs(h.x - car.x) < h.radius + 1.15) || nearbyCars.some(o => o.z - car.z < Math.max(10, car.speed * 0.65) && Math.abs(o.x - car.x) < 2.15);
+
+    const baseThrottle = redLightHold
+      ? 0
+      : threat || nearSolidObstacle
+        ? .05
+        : unavoidablePothole
+          ? .20
+          : nearSpeedBump
+            ? .25
+            : wetSlowdown
+              ? .30
+              : speedLimitThrottleCap;
+    const baseBrake = Math.max(
+      redLightBrake,
+      speedLimitBrake,
+      threat || nearSolidObstacle ? .68 : unavoidablePothole ? .48 : nearSpeedBump ? .27 : wetSlowdown ? .24 : 0,
+    );
     return {
       steer: -steer,
-      throttle: threat || nearSolidObstacle ? .08 : unavoidablePothole ? .20 : nearSpeedBump ? .25 : wetSlowdown ? .3 : .92,
-      brake: threat || nearSolidObstacle ? .64 : unavoidablePothole ? .48 : nearSpeedBump ? .27 : wetSlowdown ? .24 : 0,
+      throttle: Math.min(baseThrottle, speedLimitThrottleCap),
+      brake: baseBrake,
     };
   }
 
@@ -285,15 +451,34 @@ export class InteractiveRacePhysics {
     const water = waterContact(this.waterZones, car.x, car.z);
     if (water.immersion > .35) this.waterEvents++; // contacto real de agua
     const insideWater = water.immersion > .35;
-    if (insideWater && !car.previousWater) car.drivingEvents.waterEntries++;
+    const enteringWater = insideWater && !car.previousWater;
+    if (enteringWater) car.drivingEvents.waterEntries++;
     car.previousWater = insideWater;
     const hydroplane = Math.min(.65, water.immersion * Math.max(0, (Math.abs(speed) * 3.6 - 35) / 90));
     // El neumático pierde adherencia en un bache o superficie irregular.
     const onPothole = this.hazards.some(h => h.kind === 'pothole' &&
       Math.abs(h.z - car.z) < h.radius + 1.2 && Math.abs(h.x - car.x) < h.radius + 0.85);
     car.pothole = onPothole;
-    if (onPothole && !car.previousPothole) car.drivingEvents.potholesHit++;
+    const enteringPothole = onPothole && !car.previousPothole;
+    if (enteringPothole) car.drivingEvents.potholesHit++;
     car.previousPothole = onPothole;
+    // Salpicadura simulada cuando cae en bache con asfalto mojado/lluvia/raudal o entra en charco
+    const isRoadWet =
+      this.weather === 'rain' ||
+      this.weather === 'storm' ||
+      this.weather === 'flood' ||
+      this.track.routeHazardProfile === 'flood' ||
+      insideWater;
+    if ((enteringPothole || enteringWater) && isRoadWet && Math.abs(speed) * 3.6 > 10) {
+      this.lastWetSplash = {
+        seq: ++this.splashSeq,
+        carId: car.id,
+        x: car.x,
+        z: car.z,
+        intensity: clamp(Math.abs(speed) / 15.5, 0.42, 1.25),
+        timeSec: this.time,
+      };
+    }
     if (onPothole) { car.bump = Math.min(1, car.bump + 8 * dt); }
     else if (onSpeedBump) { car.bump = Math.min(1, Math.max(.55, car.bump)); }
     else car.bump = Math.max(0, car.bump - 2.2 * dt);
@@ -626,23 +811,176 @@ export class InteractiveRacePhysics {
         }
       }
     }
+    // Colisión contra tránsito de mano contraria: SOLO ocurre si un vehículo invade el carril izquierdo (X > +1.65)
+    if (this.urbanRulesEnabled && this.oncomingCars.length > 0) {
+      for (const car of this.cars) {
+        if (car.x < DOUBLE_YELLOW_X - 0.25) continue;
+        for (const oc of this.oncomingCars) {
+          if (Math.abs(car.z - oc.z) > 5.2) continue;
+          const dx = car.x - oc.x;
+          const dz = car.z - oc.z;
+          const minX = (car.vehicle.dimensions.widthMm / 1000 + oc.widthM) * 0.48;
+          const minZ = (car.vehicle.dimensions.lengthMm / 1000 + oc.lengthM) * 0.46;
+          if (Math.abs(dx) < minX && Math.abs(dz) < minZ) {
+            const relImpact = Math.abs(car.speed) + oc.speedMps;
+            // Empujar al invasor de regreso hacia la línea divisoria para evitar bloqueo infinito
+            car.x = Math.min(car.x, oc.x - minX - 0.18);
+            car.speed = -Math.min(4.5, oc.speedMps * 0.35);
+            car.lateralSpeed = -2.4;
+            car.yawRate *= 0.25;
+            car.damage = clamp(car.damage + relImpact / 95, 0, 1);
+            car.impacts++;
+            car.drivingEvents.collisions++;
+            car.drivingEvents.collisionSeverity += relImpact;
+            oc.speedMps *= 0.25;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  private evaluatePlayerTrafficRules(player: DynamicCar, dt: number) {
+    if (!this.urbanRulesEnabled || player.finishedAt !== null) return;
+    const kmh = Math.abs(player.speed) * 3.6;
+
+    // 1. Aviso y penalización por cinturón de seguridad
+    if (!this.seatbeltBuckled) {
+      if (!this.seatbeltReminderSent && (this.time > 1.8 || kmh > 10)) {
+        this.seatbeltReminderSent = true;
+        this.pushNotice(
+          'warning',
+          'seatbelt',
+          '🔔 ¡USÁ EL CINTURÓN DE SEGURIDAD!',
+          'Presioná [C] o el botón CINTURÓN en pantalla para evitar resta de puntos',
+          0,
+        );
+      }
+      if (kmh > 24) {
+        this.unbuckledMovingSec += dt;
+        if (!this.seatbeltPenaltyApplied && this.unbuckledMovingSec >= 6.5) {
+          this.seatbeltPenaltyApplied = true;
+          player.drivingEvents.unbuckledSeatbelt++;
+          this.pushNotice(
+            'penalty',
+            'seatbelt',
+            '🚨 PENALIZACIÓN: SIN CINTURÓN (-6 pts)',
+            'Conducir sin abrochar el cinturón descuenta puntos en Driving IQ',
+            -6,
+          );
+        }
+      }
+    }
+
+    // 2. Cruce de semáforo en ROJO (obliga a frenar antes de forwardStopZ)
+    for (const node of this.trafficLights) {
+      if (this.penalizedRedLights.has(node.id)) continue;
+      const st = getTrafficLightState(node, this.time);
+      const lineZ = st.forwardStopZ + 1.8;
+      if (this.prevPlayerZ <= lineZ && player.z > lineZ) {
+        if (st.phase === 'red' && kmh > 6) {
+          this.penalizedRedLights.add(node.id);
+          player.drivingEvents.redLightViolations++;
+          this.pushNotice(
+            'penalty',
+            'red_light',
+            '🚨 ¡PASASTE LUZ ROJA! (-6,5 pts)',
+            `No frenaste a tiempo en ${node.label}`,
+            -6.5,
+          );
+        }
+      }
+    }
+
+    // 3. Límites de velocidad MÁXIMA y MÍNIMA del tramo activo
+    const zone = getActiveSpeedLimitZone(this.speedZones, player.z);
+    if (kmh > zone.maxKmh + 6) {
+      this.overspeedSec += dt;
+      if (this.overspeedSec >= 2.2 && this.time - this.lastSpeedPenaltyAt > 7.5) {
+        this.overspeedSec = 0;
+        this.lastSpeedPenaltyAt = this.time;
+        player.drivingEvents.speedLimitViolations++;
+        this.pushNotice(
+          'penalty',
+          'max_speed',
+          `⚠️ EXCESO DE VELOCIDAD (-3 pts)`,
+          `Superaste la máxima de ${zone.maxKmh} km/h (${Math.round(kmh)} km/h)`,
+          -3,
+        );
+      }
+    } else {
+      this.overspeedSec = Math.max(0, this.overspeedSec - dt * 1.5);
+    }
+
+    const upcomingLight = findUpcomingTrafficLight(this.trafficLights, player.z, this.time, 52);
+    const excusedSlow =
+      player.z < 75 ||
+      player.pothole ||
+      Boolean(upcomingLight && upcomingLight.phase !== 'green');
+    if (!excusedSlow && kmh > 2.5 && kmh < zone.minKmh - 4) {
+      this.underspeedSec += dt;
+      if (this.underspeedSec >= 4.2 && this.time - this.lastSpeedPenaltyAt > 8.5) {
+        this.underspeedSec = 0;
+        this.lastSpeedPenaltyAt = this.time;
+        player.drivingEvents.speedLimitViolations++;
+        this.pushNotice(
+          'penalty',
+          'min_speed',
+          `⚠️ BAJO VELOCIDAD MÍNIMA (-3 pts)`,
+          `Circulás por debajo de ${zone.minKmh} km/h en vía despejada`,
+          -3,
+        );
+      }
+    } else {
+      this.underspeedSec = Math.max(0, this.underspeedSec - dt * 1.5);
+    }
+
+    // 4. Invasión de carril de mano contraria
+    if (player.x > DOUBLE_YELLOW_X + 0.38 && kmh > 8) {
+      this.wrongWaySec += dt;
+      if (this.wrongWaySec >= 1.15 && this.time - this.lastWrongWayPenaltyAt > 6.0) {
+        this.wrongWaySec = 0;
+        this.lastWrongWayPenaltyAt = this.time;
+        player.drivingEvents.wrongWayInvasions++;
+        this.pushNotice(
+          'penalty',
+          'wrong_way',
+          '🚨 ¡INVADISTE MANO CONTRARIA! (-3,5 pts)',
+          'Volvé a tu carril derecho para no chocar de frente',
+          -3.5,
+        );
+      }
+    } else {
+      this.wrongWaySec = Math.max(0, this.wrongWaySec - dt * 2);
+    }
   }
 
   step(dt: number, player: PlayerInput) {
     const step = clamp(dt, 0, .02);
     if (!step) return;
     this.time += step;
+    const playerCarBefore = this.getCar(this.playerId);
+    this.prevPlayerZ = playerCarBefore?.z ?? 0;
+
     for (const car of this.cars) {
       if (car.id !== this.playerId && car.finishedAt === null) {
+        const heldAtRed = this.urbanRulesEnabled && (() => {
+          const nl = findUpcomingTrafficLight(this.trafficLights, car.z, this.time, 18);
+          return Boolean(nl && nl.phase !== 'green' && nl.distanceToStopM >= -2);
+        })();
         if (car.aiRecoverySeconds > 0) car.aiRecoverySeconds = Math.max(0, car.aiRecoverySeconds - step);
-        else if (car.z > 15 && Math.abs(car.speed) < .65) {
+        else if (!heldAtRed && car.z > 15 && Math.abs(car.speed) < .65) {
           car.aiStationarySeconds += step;
           if (car.aiStationarySeconds > 1.3) {
-            // Reconoce qué obstáculo está bloqueando el corredor y busca el lado libre.
+            // Reconoce qué obstáculo está bloqueando el corredor y busca el lado libre dentro de su mano.
             const blocker = this.hazards.find(h => h.kind === 'barrier' &&
               h.z > car.z - 5 && h.z < car.z + 18 &&
               Math.abs(h.x - car.x) < h.radius + car.vehicle.dimensions.widthMm / 2000 + 1);
-            car.aiTargetX = blocker ? (blocker.x < 0 ? 4.6 : -4.6) : (car.x < 0 ? 3.6 : -3.6);
+            if (this.urbanRulesEnabled) {
+              car.aiTargetX = blocker ? (blocker.x < -2.4 ? -0.35 : -4.6) : (car.x < -2.4 ? -0.35 : -4.6);
+            } else {
+              car.aiTargetX = blocker ? (blocker.x < 0 ? 4.6 : -4.6) : (car.x < 0 ? 3.6 : -3.6);
+            }
             car.aiAvoidUntilZ = car.z + 22;
             car.aiRecoverySeconds = 1.55;
             car.aiStationarySeconds = 0;
@@ -652,13 +990,32 @@ export class InteractiveRacePhysics {
       const input = car.id === this.playerId ? player : this.controlAI(car);
       this.integrateCar(car, input, step);
     }
+
+    const activePlayer = this.getCar(this.playerId);
+    if (this.urbanRulesEnabled) {
+      stepOncomingTraffic(
+        this.oncomingCars,
+        this.trafficLights,
+        this.speedZones,
+        this.time,
+        step,
+        activePlayer?.z ?? 0,
+        this.track.distanceMeters,
+      );
+      if (activePlayer) this.evaluatePlayerTrafficRules(activePlayer, step);
+    }
     this.resolveCollisions();
     if (this.time - this.lastTelemetryTime >= .09) this.recordTelemetry();
   }
 
+  private get maxRaceDurationSec() {
+    const base = this.track.cityCircuitId ? 420 : 180;
+    return base * Math.max(1, this.track.laps ?? 1);
+  }
+
   getCar(id: string) { return this.cars.find(c => c.id === id); }
-  get playerFinished() { return this.getCar(this.playerId)?.finishedAt != null || this.time >= (this.track.cityCircuitId ? 420 : 180); }
-  get finished() { return this.cars.every(c => c.finishedAt !== null) || this.time >= (this.track.cityCircuitId ? 420 : 180); }
+  get playerFinished() { return this.getCar(this.playerId)?.finishedAt != null || this.time >= this.maxRaceDurationSec; }
+  get finished() { return this.cars.every(c => c.finishedAt !== null) || this.time >= this.maxRaceDurationSec; }
 
   private recordTelemetry() {
     this.lastTelemetryTime = this.time;

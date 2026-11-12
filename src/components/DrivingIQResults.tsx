@@ -56,7 +56,7 @@ export const DrivingIQResults: React.FC<Props> = ({ results, assessments, player
               </div>
             ))}
             {me && <div className="rounded-lg border border-slate-700 bg-slate-950/70 p-3 text-xs leading-relaxed text-slate-300">
-              <strong>Eventos de tu partida:</strong> {me.events.collisions} contactos · {me.events.potholesHit} baches · {me.events.speedBumpsTooFast} reductores rápidos · {me.events.lossOfControl} pérdidas de control.
+              <strong>Eventos de tu partida:</strong> {me.events.collisions} contactos · {me.events.potholesHit} baches · {me.events.speedBumpsTooFast} reductores rápidos · {me.events.lossOfControl} pérdidas de control · {me.events.redLightViolations} semáforos en rojo · {me.events.speedLimitViolations} infracciones de velocidad · {me.events.wrongWayInvasions} invasiones de mano contraria{me.events.unbuckledSeatbelt > 0 ? ' · sin cinturón' : ' · cinturón abrochado'}.
             </div>}
           </div>
           <div className="space-y-2">

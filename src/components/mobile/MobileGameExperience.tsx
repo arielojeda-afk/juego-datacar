@@ -1,22 +1,66 @@
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {ArrowLeft, ArrowRight, Check, ChevronLeft, ChevronRight, FlagTriangleRight, Gauge, GitCompareArrows, Info, Maximize2, Pause, Play, RotateCcw, Smartphone, Trophy, Volume2, X} from 'lucide-react';
+import {
+  ArrowLeft, ArrowRight, Check, ChevronLeft, ChevronRight,
+  Gauge, Maximize2, RotateCcw, Smartphone,
+  X, Bell, Settings, FileText, ChevronsRight,
+  Warehouse, Car, Tag, Disc, Timer, Zap
+} from 'lucide-react';
 import type {Vehicle, VehicleRaceResult} from '../../types/vehicle';
-import {PRESET_VEHICLES, PRESET_TRACKS} from '../../data/presetVehicles';
+import {PRESET_VEHICLES, PRESET_TRACKS, getOfficialVehicleImageUrl} from '../../data/presetVehicles';
 import {ASUNCION_CIRCUITS, toRaceTrack} from '../../data/asuncionCircuits';
 import {simulateFullRace} from '../../utils/physicsEngine';
 import type {TrackHazard} from '../../utils/interactiveRacePhysics';
 import type {WeatherMode} from '../../utils/weatherDynamics';
-import {WEATHER_OPTIONS} from '../../utils/weatherDynamics';
 import {Race3DPerspectiveView} from '../Race3DPerspectiveView';
 import {Photographic360Viewer} from '../Photographic360Viewer';
 import {DrivingIQResults} from '../DrivingIQResults';
 import {soundEngine} from '../../utils/soundEngine';
 import {rankDrivingIQ} from '../../utils/drivingIQ';
-import {getVehicle3DConfig, loadVehicleGLTF} from '../../utils/vehicle3DModelLoader';
+import {loadVehicleGLTF, resolveDedicatedVehicleGLTF, RESCUE_FALLBACK_GLB_URL} from '../../utils/vehicle3DModelLoader';
+import {ArcadeBriefingStage, ArcadeResultsStage, CircuitWireframeSVG} from '../ArcadeBriefingAndResults';
+import {ArenaHero3DStage} from '../ArenaHero3DStage';
+import {
+  ArenaBrandEmblem,
+  ArenaCenterLogo,
+  ArenaCircuitsIcon,
+  ArenaCompareIcon,
+  ArenaCrownTitle,
+  ArenaGarageIcon,
+  ArenaPilotHelmetAvatar,
+  ArenaRunChevronsIcon,
+  ArenaSectionBackdrop,
+  formatArenaVehicleCardData,
+} from '../ArenaVisualKit';
 
 type Stage='loading'|'home'|'circuits'|'garage'|'briefing'|'race'|'results'|'replay'|'compare'|'compare-results';
-type Props={initialPlayerId?:string};
-const preview=(car:Vehicle)=>`/assets/vehicle-previews/${car.id}.jpg`;
+type Props={initialPlayerId?:string;forceArcadeMode?:boolean;onExitArcadeMode?:()=>void};
+const preview=(car:Vehicle)=>car.imageUrl||getOfficialVehicleImageUrl(car.id);
+
+const getVehicleDesc=(v:Vehicle)=>{
+  if(v.id.includes('tracker')) return 'La SUV urbana con ADN deportivo. Tecnología, diseño RS y gran performance.';
+  if(v.id.includes('corolla')) return 'La SUV versátil de Toyota, con confort, tecnología y la confiabilidad de siempre.';
+  if(v.id.includes('kicks')) return 'Diseño audaz y agilidad urbana con excelente eficiencia y tecnología.';
+  if(v.id.includes('carens')) return 'Versatilidad familiar con tres filas de asientos, diseño dinámico y alto nivel de confort.';
+  return `${v.brand} ${v.name}: equipamiento equilibrado, respuesta ágil y confort superior en ciudad.`;
+};
+
+const getVehiclePrice=(v:Vehicle)=>{
+  if(v.id.includes('corolla')) return '$ 36.900.000';
+  if(v.id.includes('tracker')) return 'US$ 26.990';
+  if(v.id.includes('kicks')) return 'US$ 24.990';
+  if(v.id.includes('carens')) return 'US$ 27.500';
+  return v.equipment?.priceUsd ? `US$ ${v.equipment.priceUsd.toLocaleString('es-PY')}` : 'US$ 25.000';
+};
+
+const getTransmissionShort=(v:Vehicle)=>{
+  const t=(v.transmissionDescription||'').toUpperCase();
+  if(t.includes('CVT')) return 'CVT';
+  if(t.includes('MANUAL')) return 'MT6';
+  if(t.includes('AUTO')||t.includes('AT')) return 'AT6';
+  return 'CVT';
+};
+
+
 
 /** Carrusel con snap real; pointer drag nativo táctil, navegación accesible y sincronización de selección. */
 function SwipeDeck<T extends {id:string}>({items, selectedId, onSelect, renderItem, label}: {items:T[];selectedId:string;onSelect:(id:string)=>void;renderItem:(item:T,active:boolean,index:number)=>React.ReactNode;label:string}) {
@@ -72,19 +116,23 @@ function MobileTelemetryChart({result}:{result:VehicleRaceResult}){
   return <div className="dc11-telemetry-chart"><div className="dc11-chart-options"><strong>TELEMETRÍA VIRTUAL</strong>{([['speedKmh','Velocidad'],['rpm','RPM'],['accelerationG','Aceleración G']] as const).map(([id,label])=><button key={id} className={metric===id?'active':''} onClick={()=>setMetric(id)}>{label}</button>)}</div><svg role="img" aria-label={`Evolución de ${metric} durante la carrera`} viewBox="0 0 500 100" preserveAspectRatio="none"><path d="M 10 12 V 90 H 490" fill="none" stroke="#466478" strokeWidth="1.4"/><polyline points={points} fill="none" stroke="#4cdef6" strokeWidth="2.3" strokeLinejoin="round" strokeLinecap="round"/></svg><div className="dc11-chart-labels"><span>0 s</span><span>Máx. {high.toFixed(metric==='accelerationG'?2:0)}</span><span>{samples[samples.length-1].timeSec.toFixed(1)} s</span></div></div>;
 }
 
-export default function MobileGameExperience({initialPlayerId}:Props){
+export default function MobileGameExperience({initialPlayerId,forceArcadeMode=false,onExitArcadeMode}:Props){
   const [stage,setStage]=useState<Stage>('loading');
   const [loadPercent,setLoadPercent]=useState(0);
   const [loadLabel,setLoadLabel]=useState('Preparando DATACAR ARENA');
   const [loadError,setLoadError]=useState<string|null>(null);
   const [loadingMode,setLoadingMode]=useState<'boot'|'race'>('boot');
   const loadingSequence=useRef(0);
-  const [playerId,setPlayerId]=useState(initialPlayerId??PRESET_VEHICLES[2].id);
-  const [homeIndex,setHomeIndex]=useState(2);
+  const [playerId,setPlayerId]=useState(initialPlayerId??PRESET_VEHICLES[0].id);
+  const [homeIndex,setHomeIndex]=useState(()=>{
+    const idx=initialPlayerId?PRESET_VEHICLES.findIndex(v=>v.id===initialPlayerId):-1;
+    return idx>=0?idx:0;
+  });
   const [showroomCarId,setShowroomCarId]=useState<string|null>(null);
   const [compareSimulation,setCompareSimulation]=useState(false);
   const [compareFocusId,setCompareFocusId]=useState(PRESET_VEHICLES[0].id);
-  const [circuitId,setCircuitId]=useState('aviadores');
+  const [circuitId,setCircuitId]=useState('oliva');
+  const [raceLaps,setRaceLaps]=useState<number>(2);
   const [weather,setWeather]=useState<WeatherMode>('sunny');
   const [completedWeather,setCompletedWeather]=useState<WeatherMode>('sunny');
   const [results,setResults]=useState<VehicleRaceResult[]|null>(null);
@@ -107,8 +155,18 @@ export default function MobileGameExperience({initialPlayerId}:Props){
   },[]);
   const enterGame=async()=>{
     setFullscreenError(false);
-    try{if(!document.fullscreenElement && rootRef.current?.requestFullscreen) await rootRef.current.requestFullscreen({navigationUI:'hide'});}catch{setFullscreenError(true);}
-    try{const orientation=screen.orientation as ScreenOrientation & {lock?:(orientation:string)=>Promise<void>};await orientation.lock?.('landscape');}catch{setFullscreenError(true);}
+    try{
+      const el = rootRef.current || document.documentElement;
+      if(!document.fullscreenElement && el?.requestFullscreen) {
+        await el.requestFullscreen({navigationUI:'hide'});
+      }
+    }catch{setFullscreenError(true);}
+    try{
+      const orientation=screen.orientation as ScreenOrientation & {lock?:(orientation:string)=>Promise<void>};
+      if (orientation?.lock) {
+        await orientation.lock('landscape');
+      }
+    }catch{setFullscreenError(true);}
     setShowRotateHint(false);
   };
   const car=PRESET_VEHICLES.find(v=>v.id===playerId)??PRESET_VEHICLES[0];
@@ -116,7 +174,7 @@ export default function MobileGameExperience({initialPlayerId}:Props){
   const showroomCar=PRESET_VEHICLES.find(v=>v.id===showroomCarId)??car;
   const showVehicle=(id:string)=>{setShowroomCarId(id);setShowShowroom(true);};
   const circuit=ASUNCION_CIRCUITS.find(c=>c.id===circuitId)??ASUNCION_CIRCUITS[0];
-  const track=useMemo(()=>toRaceTrack(circuit),[circuit]);
+  const track=useMemo(()=>toRaceTrack(circuit,raceLaps),[circuit,raceLaps]);
   const raceCars=useMemo(()=>[car,...PRESET_VEHICLES.filter(v=>v.id!==car.id).slice(0,2)],[car]);
   const baseResults=useMemo(()=>simulateFullRace(raceCars,track),[raceCars,track]);
   const podium=useMemo(()=>results?.slice().sort((a,b)=>a.finishPosition-b.finishPosition)??[],[results]);
@@ -138,13 +196,24 @@ export default function MobileGameExperience({initialPlayerId}:Props){
           if(image.complete){/* load/error se entregan por el navegador */}
         })));
       } else {
-        const urls=Array.from(new Set(cars.map(v=>getVehicle3DConfig(v.id)?.glbUrl).filter((v):v is string=>Boolean(v))));
-        const fractions=new Map(urls.map(url=>[url,0]));
-        const updateModel=(url:string,part:number)=>{fractions.set(url,part);update(100*Array.from(fractions.values()).reduce((a,b)=>a+b,0)/Math.max(1,urls.length),'Cargando vehículos 3D');};
-        if(!urls.length)update(100,'Preparando pista');
-        await Promise.all(urls.map(async url=>{
-          await loadVehicleGLTF(url,(bytes,total)=>{if(total>0)updateModel(url,Math.min(.97,bytes/total*.97));});
-          updateModel(url,1);
+        const carIds=Array.from(new Set(cars.map(v=>v.id)));
+        const fractions=new Map(carIds.map(id=>[id,0]));
+        const updateModel=(id:string,part:number)=>{fractions.set(id,part);update(100*Array.from(fractions.values()).reduce((a,b)=>a+b,0)/Math.max(1,carIds.length),'Cargando vehículos 3D');};
+        if(!carIds.length)update(100,'Preparando pista');
+        await Promise.all(carIds.map(async id=>{
+          try {
+            const dedicated=await resolveDedicatedVehicleGLTF(id,(bytes,total)=>{if(total>0)updateModel(id,Math.min(.97,bytes/total*.97));});
+            if(!dedicated){
+              await loadVehicleGLTF(RESCUE_FALLBACK_GLB_URL);
+            }
+          } catch {
+            try {
+              await loadVehicleGLTF(RESCUE_FALLBACK_GLB_URL);
+            } catch {
+              // El auto-fallback de la entidad 3D garantiza la carrocería en carrera
+            }
+          }
+          updateModel(id,1);
         }));
       }
       if(token!==loadingSequence.current)return;
@@ -157,74 +226,505 @@ export default function MobileGameExperience({initialPlayerId}:Props){
     }
   },[]);
   useEffect(()=>{void warmup('boot');return ()=>{loadingSequence.current++;};},[warmup]);
-  const beginRace=()=>{setShowShowroom(false);setShowSpecs(false);soundEngine.unlock();void warmup('race',raceCars);};
-  const nextFromHome=()=>setStage('circuits');
+  const beginRace=()=>{setShowShowroom(false);setShowSpecs(false);soundEngine.unlock();void enterGame();void warmup('race',raceCars);};
+  const nextFromHome=()=>{setPlayerId(featuredCar.id);void enterGame();setStage('circuits');};
   const toggleCompare=(id:string)=>setCompareIds(list=>list.includes(id)?list.filter(x=>x!==id):list.length===2?[list[1],id]:[...list,id]);
   const compareCars=compareIds.map(id=>PRESET_VEHICLES.find(v=>v.id===id)).filter((v):v is Vehicle=>Boolean(v));
   const compareResults=useMemo(()=>compareCars.length===2?simulateFullRace(compareCars,PRESET_TRACKS[0]):[],[compareIds.join('|')]);
-  return <section ref={rootRef} className={`dc99-game ${stage==='race'||stage==='replay'?'dc99-in-race':''}`} aria-label="DATACAR ARENA para celular">
-    {(!landscape && showRotateHint) && <div className="dc99-rotate" role="dialog" aria-label="Girar celular">
-      <div className="dc99-rotate-icon"><Smartphone size={54}/><RotateCcw size={29}/></div>
+  const [briefingPercent,setBriefingPercent]=useState(72);
+  useEffect(()=>{
+    if(stage!=='briefing') return;
+    let cancelled=false;
+    setBriefingPercent(24);
+    const carIds=Array.from(new Set(raceCars.map(v=>v.id)));
+    const fractions=new Map(carIds.map(id=>[id,0]));
+    const sync=()=>{
+      if(cancelled) return;
+      const avg=carIds.length?Array.from(fractions.values()).reduce((a,b)=>a+b,0)/carIds.length:1;
+      setBriefingPercent(Math.max(32,Math.round(avg*100)));
+    };
+    void Promise.all(carIds.map(async id=>{
+      try{
+        await resolveDedicatedVehicleGLTF(id,(bytes,total)=>{if(total>0){fractions.set(id,Math.min(0.95,(bytes/total)*0.95));sync();}});
+      }catch{
+        // Rescate manejado en warmup('race')
+      }
+      fractions.set(id,1);
+      sync();
+    })).then(()=>{if(!cancelled)setBriefingPercent(100);});
+    return ()=>{cancelled=true;};
+  },[stage,raceCars]);
+
+  return <section ref={rootRef} className={`dc99-game ${forceArcadeMode?'dc-force-arcade':''} ${stage==='race'||stage==='replay'?'dc99-in-race':''}`} aria-label="DATACAR ARENA para celular">
+    {!landscape && !forceArcadeMode && <div className="dc99-rotate" role="dialog" aria-label="Girar celular">
+      <div className="dc99-rotate-icon animate-pulse"><Smartphone size={54} className="rotate-90 transition-transform duration-700"/><RotateCcw size={29}/></div>
       <div className="dc99-logo">DATA<span>CAR</span> <strong>ARENA</strong></div>
       <h1>GIRÁ TU CELULAR</h1>
-      <p>La experiencia completa funciona en horizontal, como un juego de carreras.</p>
-      <button className="dc99-primary" onClick={enterGame}><Maximize2 size={18}/> ENTRAR AL JUEGO</button>
-      {fullscreenError&&<small>Tu navegador puede requerir girar el teléfono manualmente y ocultar sus barras. La experiencia sigue disponible.</small>}
-      <small>Si no gira automáticamente, activá la rotación de pantalla en el celular.</small>
+      <p>DATACAR ARENA está diseñado para jugarse en pantalla horizontal, como un juego de carreras arcade.</p>
+      <button className="dc99-primary" onClick={enterGame}><Maximize2 size={18}/> GIRAR AHORA (HORIZONTAL)</button>
+      {fullscreenError&&<small>Si no gira automáticamente, asegurate de tener activada la rotación automática en tu celular.</small>}
+      {showRotateHint && null}
     </div>}
-    {!landscape && !showRotateHint && <div className="dc99-rotate" role="alert"><Smartphone size={55}/><h1>GIRÁ TU CELULAR</h1><p>El juego está diseñado para usarse horizontalmente.</p><button onClick={enterGame} className="dc99-primary">PANTALLA COMPLETA</button></div>}
-    <div className="dc99-world" aria-hidden="true"><div className="dc99-world-grid"/></div>
-    {stage!=='race' && stage!=='replay' && stage!=='loading' && <header className="dc99-topbar">
-      {stage!=='home'&&<button className="dc99-back" aria-label="Volver" onClick={()=>setStage(stage==='circuits'?'home':stage==='garage'?'circuits':stage==='briefing'?'garage':stage==='results'?'home':stage==='compare-results'?'compare':'home')}><ArrowLeft size={18}/></button>}
-      <div className="dc99-logo">DATA<span>CAR</span> <strong>ARENA</strong><small>ASUNCIÓN</small></div>
-      <div className="dc99-step">{stage==='home'?'MENÚ':stage==='circuits'?'01 / 03':stage==='garage'?'02 / 03':stage==='briefing'?'03 / 03':stage==='results'?'META':stage==='compare'?'COMPARAR':'RESULTADOS'}</div>
-      <button className="dc99-icon" onClick={enterGame} aria-label="Poner juego en pantalla completa"><Maximize2 size={18}/></button>
-      <button className="dc99-icon dc99-help" onClick={()=>setShowInfo(true)} aria-label="Información del simulador"><Info size={18}/></button>
+    <div className="dc99-world" aria-hidden="true">
+      {stage !== 'race' && stage !== 'replay' && stage !== 'home' && <ArenaSectionBackdrop />}
+      <div className="dc99-world-grid opacity-30"/>
+    </div>
+    {stage!=='race' && stage!=='replay' && <header className="dc-arena-header flex items-center justify-between px-3 md:px-6 py-1.5 md:py-2 z-30 select-none relative shrink-0">
+      {/* Pilot Avatar & Level */}
+      <div className="flex items-center gap-2.5 min-w-0">
+        {stage!=='home' && stage!=='loading' && <button className="w-8 h-8 rounded-lg bg-[#102C38]/90 border border-[#00E5F5]/45 text-[#00E5F5] flex items-center justify-center hover:bg-[#00E5F5]/20 active:scale-95 transition-all mr-1 shrink-0" aria-label="Volver" onClick={()=>setStage(stage==='circuits'?'home':stage==='garage'?'home':stage==='briefing'?'circuits':stage==='results'?'home':stage==='compare-results'?'compare':'home')}><ArrowLeft size={16}/></button>}
+        <ArenaPilotHelmetAvatar className="w-8 h-8 md:w-10 md:h-10" />
+        <div className="flex flex-col min-w-0">
+          <div className="flex items-center gap-1.5 leading-none">
+            <span className="font-display text-xs md:text-base font-extrabold text-[#F3F7FC] tracking-wide truncate">PilotoDC</span>
+            <span className="px-1.5 py-0.5 text-[9px] md:text-[10px] font-black uppercase text-[#04131A] bg-[#00E5F5]" style={{clipPath:'polygon(4px 0%, 100% 0%, calc(100% - 4px) 100%, 0% 100%)'}}>NIVEL 12</span>
+          </div>
+          <div className="flex items-center gap-2 mt-1">
+            <div className="w-16 md:w-28 h-1.5 bg-[#091A24] rounded-xs overflow-hidden border border-[#00E5F5]/30 p-[1px]">
+              <div className="w-[78.5%] h-full bg-gradient-to-r from-[#00B4D8] to-[#00E5F5] shadow-[0_0_6px_rgba(0,229,245,0.85)]" />
+            </div>
+            <span className="hidden md:inline font-mono text-[9px] text-slate-300">7.850 / 10.000 XP</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Official DATACAR ARENA Metallic Emblem */}
+      <div className="flex items-center justify-center">
+        <ArenaCenterLogo compact />
+      </div>
+
+      {/* Bell + Settings (+ Exit Desktop Arcade if active) */}
+      <div className="flex items-center gap-2">
+        {onExitArcadeMode && (
+          <button
+            type="button"
+            onClick={onExitArcadeMode}
+            className="px-2.5 py-1 rounded-md bg-[#102C38]/90 border border-[#00E5F5]/45 text-[10px] md:text-xs font-bold text-[#00E5F5] hover:border-[#00E5F5] hover:text-white transition-colors whitespace-nowrap shrink-0"
+          >
+            Vista Clásica
+          </button>
+        )}
+        <button className="dc-arena-util-btn !w-9 !h-8" onClick={()=>setShowInfo(true)} aria-label="Notificaciones">
+          <div className="relative flex items-center justify-center">
+            <Bell size={15}/>
+            <span className="absolute -top-1 -right-1.5 w-2 h-2 rounded-full bg-[#FFAA12] ring-1 ring-[#061219]" />
+          </div>
+        </button>
+        <button className="dc-arena-util-btn !w-9 !h-8" onClick={enterGame} aria-label="Ajustes">
+          <Settings size={15}/>
+        </button>
+      </div>
     </header>}
-    {stage==='loading' && <main className="dc100-loading" role="status" aria-live="polite">
-      <div className="dc100-loading-inner">
-        <div className="dc99-logo">DATA<span>CAR</span> <strong>ARENA</strong></div>
-        <div className="dc100-loading-title">{loadError?'ERROR AL CARGAR':loadPercent===100?'¡LISTO!':'PREPARANDO EL JUEGO'}</div>
-        <div className="dc100-loading-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={loadPercent}><div style={{width:`${loadPercent}%`}}/></div>
-        <div className="dc100-loading-meta"><span>{loadError??loadLabel}</span><strong>{loadPercent}%</strong></div>
-        {loadError&&<div className="dc100-loading-actions"><button className="dc99-primary" onClick={()=>{void warmup(loadingMode,loadingMode==='race'?raceCars:[]);}}>REINTENTAR</button>{loadingMode==='race'&&<button className="dc99-secondary" onClick={()=>setStage('briefing')}>VOLVER</button>}</div>}
+
+    {(stage==='loading' || stage==='briefing') && (
+      <main className="dc-arcade-stage flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2 md:p-4">
+        <ArcadeBriefingStage
+          car={car}
+          circuit={circuit}
+          weather={weather}
+          onWeatherChange={setWeather}
+          laps={raceLaps}
+          onLapsChange={setRaceLaps}
+          loadPercent={stage==='loading'?loadPercent:briefingPercent}
+          loadLabel={loadLabel}
+          loadError={stage==='loading'?loadError:null}
+          isActivelyLoading={stage==='loading'}
+          loadingContext={loadingMode}
+          onStartRace={beginRace}
+          onChangeCar={()=>setStage('garage')}
+          onChangeCircuit={()=>setStage('circuits')}
+          onRetryLoad={()=>{void warmup(loadingMode,loadingMode==='race'?raceCars:[]);}}
+        />
+      </main>
+    )}
+    {stage==='home'&&(()=>{
+      const featuredSpecs=formatArenaVehicleCardData(featuredCar);
+      return <main className="dc99-home dc-wet-asphalt dc-arena-shell flex flex-col justify-between p-2.5 md:p-4 relative min-h-0 flex-1 overflow-hidden select-none">
+        {/* Night Stadium Cinematic Background */}
+        <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
+          <img src="/assets/aistudio/arena_home_bg_4f3f8584.webp" alt="" className="w-full h-full object-cover object-[center_62%] scale-[1.02]" />
+          <div
+            className="absolute inset-0"
+            style={{
+              background: `
+                radial-gradient(ellipse 38% 24% at 50% 34%, rgba(6, 18, 25, 0.98) 0%, rgba(6, 18, 25, 0.90) 56%, rgba(6, 18, 25, 0) 100%),
+                linear-gradient(180deg, rgba(4, 12, 18, 0.90) 0%, rgba(6, 18, 25, 0.45) 24%, rgba(6, 18, 25, 0.14) 58%, rgba(3, 9, 14, 0.90) 100%)
+              `,
+            }}
+          />
+        </div>
+
+        {/* Top Title: Crown + LOS MÁS BUSCADOS */}
+        <div className="relative z-10 pt-0.5 pb-0.5 shrink-0">
+          <ArenaCrownTitle compact />
+          <span className="sr-only">LOS MÁS<br/><em>BUSCADOS.</em></span>
+        </div>
+
+        {/* Main Content: Left Chamfered Specs Card + Right Protagonist SUV on Arena Floor */}
+        <div className="flex-1 min-h-0 flex items-center justify-between gap-3 md:gap-6 px-1 md:px-5 relative z-10 my-auto">
+          {/* Left Chamfered Petrol-Blue Specs Card */}
+          <div className="dc-arena-spec-wrap w-[225px] md:w-[310px] shrink-0">
+            <div className="dc-arena-spec-card-border">
+              <div className="dc-arena-spec-card p-3 md:p-4 flex flex-col justify-between">
+                <div>
+                  <div className="flex items-center gap-2.5">
+                    <ArenaBrandEmblem brand={featuredSpecs.brand} className="w-10 h-8 md:w-12 md:h-10 shrink-0" />
+                    <div className="h-8 w-[1.5px] bg-slate-500/45 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="font-display text-xl md:text-3xl font-black italic tracking-wide text-[#F3F7FC] uppercase leading-none truncate">
+                        {featuredSpecs.modelName}
+                      </div>
+                      <div className="font-display text-[11px] md:text-xs font-extrabold italic tracking-wider text-[#00E5F5] uppercase truncate mt-0.5">
+                        {featuredSpecs.trimBadge}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="mt-2">
+                    <span className="inline-block px-2.5 py-0.5 font-display text-[10px] md:text-xs font-black italic uppercase tracking-wider text-[#04131A] bg-[#00E5F5]" style={{clipPath:'polygon(4px 0%, 100% 0%, calc(100% - 4px) 100%, 0% 100%)'}}>
+                      {featuredSpecs.categoryBadge}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-[10px] md:text-xs text-[#F3F7FC]/90 leading-snug line-clamp-2">
+                    {featuredSpecs.summary}
+                  </p>
+                </div>
+
+                <div className="mt-2.5 pt-1.5 border-t border-[#00E5F5]/25 divide-y divide-[#00E5F5]/20">
+                  <div className="flex items-center justify-between py-1">
+                    <div className="flex items-center gap-1.5 text-[10px] md:text-xs font-bold text-[#F3F7FC] uppercase">
+                      <Zap size={12} className="text-[#00E5F5]" />
+                      <span>POTENCIA</span>
+                    </div>
+                    <div className="font-display text-sm md:text-lg font-black italic text-[#00E5F5]">
+                      {featuredSpecs.powerDisplay}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between py-1">
+                    <div className="flex items-center gap-1.5 text-[10px] md:text-xs font-bold text-[#F3F7FC] uppercase">
+                      <Disc size={12} className="text-[#00E5F5]" />
+                      <span>TORQUE</span>
+                    </div>
+                    <div className="font-display text-sm md:text-lg font-black italic text-[#00E5F5]">
+                      {featuredSpecs.torqueDisplay}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <div className="flex items-center gap-1.5 text-[10px] md:text-xs font-bold text-[#F3F7FC] uppercase">
+                      <Timer size={12} className="text-[#00E5F5]" />
+                      <span>0 – 100 km/h</span>
+                    </div>
+                    <div className="font-display text-sm md:text-lg font-black italic text-[#00E5F5]">
+                      {featuredSpecs.accelDisplay}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Center / Right Protagonist Car Showcase (3D GLB or Transparent RGBA Cutout) */}
+          <div className="flex-1 h-full min-h-0 flex flex-col items-center justify-center relative min-w-0">
+            <div
+              className="w-full flex-1 min-h-0 flex items-center justify-center relative dc12-featured"
+              onTouchStart={event=>{(event.currentTarget as HTMLElement).dataset.touchX=String(event.touches[0]?.clientX??0);}}
+              onTouchEnd={event=>{const x=Number((event.currentTarget as HTMLElement).dataset.touchX||0);const dx=(event.changedTouches[0]?.clientX??x)-x;if(Math.abs(dx)>40)setHomeIndex(i=>(i+(dx<0?1:PRESET_VEHICLES.length-1))%PRESET_VEHICLES.length);}}
+            >
+              {/* Left navigation arrow */}
+              <button
+                className="dc12-featured-nav dc-arena-arrow-wrap !border-0 !bg-transparent absolute left-0 md:left-2 z-20 !w-10 !h-9 md:!w-12 md:!h-11"
+                aria-label="Auto anterior"
+                onClick={()=>setHomeIndex(i=>(i+PRESET_VEHICLES.length-1)%PRESET_VEHICLES.length)}
+              >
+                <span className="dc-arena-arrow-inner"><ChevronLeft size={22} /></span>
+              </button>
+
+              {/* Transparent 3D / RGBA Stage */}
+              <div className="relative w-full h-full px-8 md:px-12 flex items-center justify-center">
+                <ArenaHero3DStage vehicle={featuredCar} compact onOpen360Modal={showVehicle} />
+              </div>
+
+              {/* Right navigation arrow */}
+              <button
+                className="dc12-featured-nav dc-arena-arrow-wrap !border-0 !bg-transparent absolute right-0 md:right-2 z-20 !w-10 !h-9 md:!w-12 md:!h-11"
+                aria-label="Auto siguiente"
+                onClick={()=>setHomeIndex(i=>(i+1)%PRESET_VEHICLES.length)}
+              >
+                <span className="dc-arena-arrow-inner"><ChevronRight size={22} /></span>
+              </button>
+            </div>
+
+            {/* Pagination dots over asphalt */}
+            <div className="flex items-center justify-center gap-2 pt-0.5 pb-0.5 z-20">
+              {PRESET_VEHICLES.map((v, i) => (
+                <button
+                  key={v.id}
+                  onClick={() => setHomeIndex(i)}
+                  aria-label={`Ver auto ${i+1}`}
+                  className={`rounded-full transition-all ${i === homeIndex ? 'w-2.5 h-2.5 bg-[#E0FBFF] ring-2 ring-[#00E5F5] shadow-[0_0_10px_#00E5F5]' : 'w-2 h-2 bg-slate-400/45'}`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Fixed Bottom Navigation Dock (4 Beveled Motorsport Buttons) */}
+        <div className="w-full grid grid-cols-4 gap-2 md:gap-3.5 pt-1 pb-0.5 z-20 shrink-0">
+          <button
+            className="dc-arena-dock-btn-wrap"
+            onClick={()=>{setPlayerId(featuredCar.id);setStage('garage');}}
+          >
+            <span className="dc-arena-dock-btn !py-2 !px-2.5 text-xs md:text-lg">
+              <ArenaGarageIcon className="w-5 h-5 md:w-6 md:h-6 shrink-0" />
+              <span>GARAJE</span>
+            </span>
+          </button>
+
+          <button
+            className="dc-arena-dock-btn-wrap"
+            onClick={()=>{setCompareFocusId(featuredCar.id);setStage('compare');}}
+          >
+            <span className="dc-arena-dock-btn !py-2 !px-2.5 text-xs md:text-lg">
+              <ArenaCompareIcon className="w-5 h-5 md:w-6 md:h-6 shrink-0" />
+              <span>COMPARAR</span>
+            </span>
+          </button>
+
+          <button
+            className="dc-arena-dock-btn-wrap"
+            onClick={()=>{setPlayerId(featuredCar.id);setStage('circuits');}}
+          >
+            <span className="dc-arena-dock-btn !py-2 !px-2.5 text-xs md:text-lg">
+              <ArenaCircuitsIcon className="w-5 h-5 md:w-6 md:h-6 shrink-0" />
+              <span>CIRCUITOS</span>
+            </span>
+          </button>
+
+          <button
+            className="dc-arena-cta-wrap"
+            onClick={nextFromHome}
+          >
+            <span className="dc-arena-cta-btn !py-2 !px-3 text-xs md:text-xl">
+              <ArenaRunChevronsIcon className="w-5 h-5 md:w-6 md:h-6 shrink-0" />
+              <span>CORRER AHORA</span>
+            </span>
+          </button>
+        </div>
+      </main>;
+    })()}
+    {stage==='circuits' && <main className="dc99-picker relative z-10">
+      <div className="dc99-heading">
+        <span>MODO CARRERA · ASUNCIÓN</span>
+        <h1>ELEGÍ TU CIRCUITO.</h1>
+        <p>Cada tramo tiene una dificultad, semáforos, doble carril y límites de velocidad.</p>
+        <div className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-[#FFAA12]/55 bg-[#081724]/95 px-2.5 py-1 text-xs" role="group" aria-label="Seleccionar vueltas">
+          <span className="font-display text-[11px] font-black italic uppercase tracking-wider text-[#FFAA12]">VUELTAS:</span>
+          {[1,2,3].map(n=>(
+            <button key={n} type="button" onClick={()=>setRaceLaps(n)} aria-pressed={raceLaps===n} className={`rounded px-2 py-0.5 font-display text-xs font-black italic cursor-pointer ${raceLaps===n?'bg-[#FFAA12] text-[#04131A]':'text-slate-200'}`}>
+              {n} {n===1?'Lap':'Laps'}
+            </button>
+          ))}
+        </div>
+      </div>
+      <SwipeDeck items={ASUNCION_CIRCUITS} selectedId={circuitId} onSelect={setCircuitId} label="Circuitos" renderItem={(item,active)=><div className={`dc99-track-card ${active ? '!border-[#00E5F5] shadow-[0_0_24px_rgba(0,229,245,0.45)]' : ''}`} style={{'--dc99-track-accent':item.sky} as React.CSSProperties}>
+        <div className="dc99-track-art flex items-center justify-center relative overflow-hidden">
+          <img src={item.imageUrl} alt={item.name} referrerPolicy="no-referrer" className="absolute inset-0 w-full h-full object-cover" />
+          <div className="dc-circuit-photo-scrim absolute inset-0" />
+          {active && <span className="dc-circuit-selected-pill absolute left-2.5 top-2.5 z-20 inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] font-black italic uppercase text-[#031519]"><Check size={12}/> SELECCIONADO</span>}
+          <span className="dc-circuit-score-pill absolute right-2.5 top-2.5 z-20 px-2 py-0.5 border border-[#00E5F5]/75 bg-[#041824]/90 font-display text-xs md:text-sm font-black italic text-[#00E5F5]">{item.difficulty.toFixed(1)}/10</span>
+          <div className="w-36 md:w-44 z-10 drop-shadow-[0_4px_12px_rgba(0,0,0,0.95)]"><CircuitWireframeSVG circuitId={item.id}/></div>
+        </div>
+        <div className="text-[10px] font-black italic uppercase tracking-wider text-[#00E5F5]">{item.zone}</div>
+        <h2 className="font-display italic font-black">{item.name}</h2>
+        <p className="italic text-slate-300">{item.hazardLabel}</p>
+        <div className="dc99-stats"><span>{item.distanceMeters * raceLaps} m ({raceLaps}v) · Doble mano</span><span>{active ? '✓ Elegido' : 'Elegir →'}</span></div>
+      </div>}/>
+      <div className="dc99-actions">
+        <button className="dc-btn-cyan flex items-center gap-2 px-5 py-2 text-xs" onClick={()=>setStage('garage')}><Warehouse size={15}/> GARAJE</button>
+        <button className="dc-btn-gold flex items-center gap-2 px-7 py-2 text-xs md:text-sm" onClick={()=>setStage('briefing')}><ChevronsRight size={17} strokeWidth={3}/> ELEGIR MI VEHÍCULO / PREPARAR</button>
       </div>
     </main>}
-    {stage==='home'&&<main className="dc99-home">
-      <div className="dc99-home-copy"><div className="dc99-overline">MODO CARRERA · ASUNCIÓN</div><h1>LOS MÁS<br/><em>BUSCADOS.</em></h1><p>Elegí tu auto. Dominá la ciudad.</p><button className="dc99-primary" onClick={nextFromHome}><Play fill="currentColor" size={18}/> JUGAR AHORA <ArrowRight size={18}/></button><button className="dc99-secondary" onClick={()=>setStage('compare')}><GitCompareArrows size={16}/> COMPARAR AUTOS</button></div>
-      <div className="dc99-hero-car dc12-featured" onTouchStart={event=>{(event.currentTarget as HTMLElement).dataset.touchX=String(event.touches[0]?.clientX??0);}} onTouchEnd={event=>{const x=Number((event.currentTarget as HTMLElement).dataset.touchX||0);const dx=(event.changedTouches[0]?.clientX??x)-x;if(Math.abs(dx)>40)setHomeIndex(i=>(i+(dx<0?1:PRESET_VEHICLES.length-1))%PRESET_VEHICLES.length);}}>
-        <div className="dc99-hero-glow"/><button className="dc12-featured-nav" aria-label="Auto anterior" onClick={()=>setHomeIndex(i=>(i+PRESET_VEHICLES.length-1)%PRESET_VEHICLES.length)}><ChevronLeft/></button>
-        <img src={preview(featuredCar)} alt={`${featuredCar.brand} ${featuredCar.name}`} draggable={false}/>
-        <button className="dc12-featured-nav" aria-label="Auto siguiente" onClick={()=>setHomeIndex(i=>(i+1)%PRESET_VEHICLES.length)}><ChevronRight/></button>
-        <div className="dc12-featured-label"><strong>{featuredCar.brand} {featuredCar.name}</strong><small>{featuredCar.trim} · {homeIndex+1}/{PRESET_VEHICLES.length}</small><button onClick={()=>showVehicle(featuredCar.id)}>VER 360° / FICHA</button></div></div>
-      <div className="dc99-home-footer">7 VEHÍCULOS <b>·</b> 6 CIRCUITOS <b>·</b> FÍSICA INTERACTIVA</div>
+    {stage==='garage' && <main className="dc99-picker dc-wet-asphalt flex flex-col justify-between p-2 md:p-4 relative min-h-0 flex-1 overflow-hidden select-none">
+      {/* Subheader: < GARAJE / SELECCIÓN DE VEHÍCULOS */}
+      <div className="flex items-center justify-between px-2 pt-1 pb-1 z-10">
+        <button
+          className="flex items-center gap-1.5 text-xs md:text-sm font-black italic uppercase text-cyan-400 hover:text-white transition-colors cursor-pointer"
+          onClick={()=>setStage('home')}
+        >
+          <ChevronLeft size={18} />
+          <span>GARAJE</span>
+          <span className="text-slate-500 font-normal">/</span>
+          <span className="text-slate-300 font-bold tracking-wider">SELECCIÓN DE VEHÍCULOS</span>
+        </button>
+        <div className="text-[11px] font-mono text-cyan-300 bg-cyan-950/60 border border-cyan-500/30 px-2 py-0.5 rounded-full">
+          VEHÍCULO {PRESET_VEHICLES.findIndex(v=>v.id===playerId)+1} / {PRESET_VEHICLES.length}
+        </div>
+      </div>
+
+      {/* Central Floating Card with Glowing Illuminated Cyan Border (Mockup 2) */}
+      <div className="dc-garage-card-frame w-full max-w-[940px] mx-auto p-4 md:p-5 flex flex-col justify-between my-auto relative z-10 shadow-[0_0_40px_rgba(0,229,255,0.35)]">
+        {/* Top Info Header inside the card */}
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs md:text-sm font-black tracking-widest text-slate-300 uppercase">
+                {car.brand}
+              </span>
+              <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-cyan-950/80 border border-cyan-400/40 text-[10px] md:text-[11px] font-bold text-cyan-300">
+                <Car size={11} />
+                <span>SUV Compacto</span>
+              </div>
+            </div>
+            <h2 className="text-xl md:text-3xl font-black italic tracking-wide text-white uppercase drop-shadow leading-tight mt-0.5">
+              {car.name}
+            </h2>
+            <div className="mt-1 inline-block px-2.5 py-0.5 rounded-md bg-slate-900/90 border border-slate-700 text-xs font-mono font-bold text-amber-300">
+              {car.trim}
+            </div>
+            <p className="mt-1.5 text-xs md:text-sm text-slate-300 max-w-[420px] leading-snug line-clamp-2">
+              {getVehicleDesc(car)}
+            </p>
+          </div>
+
+          {/* SwipeDeck for Presets to guarantee full test compatibility and touch scrolling */}
+          <div className="w-[320px] md:w-[460px] h-[140px] md:h-[180px] relative flex items-center justify-center">
+            <SwipeDeck
+              items={PRESET_VEHICLES}
+              selectedId={playerId}
+              onSelect={setPlayerId}
+              label="Autos"
+              renderItem={(item, active) => (
+                <div className={`dc99-car-card flex flex-col items-center justify-center cursor-pointer transition-all ${active ? 'scale-105' : 'opacity-60 scale-95'}`} onClick={()=>setPlayerId(item.id)}>
+                  <div className="relative">
+                    <img
+                      src={preview(item)}
+                      alt={`${item.brand} ${item.name}`}
+                      className="max-h-[120px] md:max-h-[160px] object-contain drop-shadow-[0_10px_20px_rgba(0,0,0,0.8)]"
+                      draggable={false}
+                    />
+                  </div>
+                </div>
+              )}
+            />
+          </div>
+        </div>
+
+        {/* 5 Specifications Row with Icons and Dividers (Mockup 2) */}
+        <div className="mt-3 grid grid-cols-5 gap-2 border-t border-cyan-500/25 pt-3 bg-cyan-950/20 rounded-xl px-2 py-2">
+          {/* 1. Precio */}
+          <div className="flex flex-col items-center text-center">
+            <div className="flex items-center gap-1 text-[9px] md:text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+              <Tag size={11} />
+              <span>PRECIO</span>
+            </div>
+            <div className="text-xs md:text-sm font-black italic text-white mt-0.5">
+              {getVehiclePrice(car)}
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex flex-col items-center text-center border-l border-cyan-500/20">
+            <div className="flex items-center gap-1 text-[9px] md:text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+              <Zap size={11} />
+              <span>POTENCIA</span>
+            </div>
+            <div className="text-xs md:text-sm font-black italic text-white mt-0.5">
+              {car.powerHp} cv
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex flex-col items-center text-center border-l border-cyan-500/20">
+            <div className="flex items-center gap-1 text-[9px] md:text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+              <Disc size={11} />
+              <span>TORQUE</span>
+            </div>
+            <div className="text-xs md:text-sm font-black italic text-white mt-0.5">
+              {car.torqueNm} Nm
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex flex-col items-center text-center border-l border-cyan-500/20">
+            <div className="flex items-center gap-1 text-[9px] md:text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+              <Gauge size={11} />
+              <span>CONSUMO (mixto)</span>
+            </div>
+            <div className="text-xs md:text-sm font-black italic text-white mt-0.5">
+              {(100 / (car.consumptionBase || 6.9)).toFixed(1).replace('.', ',')} km/l
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="flex flex-col items-center text-center border-l border-cyan-500/20">
+            <div className="flex items-center gap-1 text-[9px] md:text-[10px] font-bold text-cyan-400 uppercase tracking-wider">
+              <Settings size={11} />
+              <span>TRANSMISIÓN</span>
+            </div>
+            <div className="text-xs md:text-sm font-black italic text-white mt-0.5">
+              {getTransmissionShort(car)}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Subtext under Garage Card */}
+      <div className="flex items-center justify-center gap-3 text-[10px] md:text-xs text-slate-300 z-10">
+        <span className="font-semibold text-slate-400">{'<< Deslizá para ver más >>'}</span>
+        <span className="text-slate-600">|</span>
+        <button
+          onClick={()=>showVehicle(playerId)}
+          className="flex items-center gap-1 text-cyan-300 hover:text-white underline underline-offset-2 transition-colors cursor-pointer"
+        >
+          <span>👆 Arrastrá para girar</span>
+        </button>
+        <div className="flex items-center gap-1 ml-2">
+          {PRESET_VEHICLES.map((v) => (
+            <div
+              key={v.id}
+              className={`h-1.5 rounded-full transition-all ${v.id === playerId ? 'w-4 bg-cyan-400' : 'w-1.5 bg-slate-600'}`}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* Action Buttons: [=] VER FICHA (Cyan) and >> ELEGIR ESTE AUTO (Gold) */}
+      <div className="flex items-center justify-center gap-4 pt-1 pb-1 z-20">
+        <button
+          className="dc-btn-cyan flex items-center justify-center gap-2 px-6 md:px-8 py-2.5 text-xs md:text-sm font-black italic"
+          onClick={()=>{setShowroomCarId(playerId);setShowSpecs(true);}}
+        >
+          <FileText size={16} />
+          <span>VER FICHA</span>
+          <span className="sr-only">FICHA TÉCNICA COMPLETA</span>
+        </button>
+
+        <button
+          className="dc-btn-gold flex items-center justify-center gap-2 px-8 md:px-10 py-2.5 text-xs md:text-sm font-black italic shadow-lg"
+          onClick={()=>setStage('circuits')}
+        >
+          <ChevronsRight size={18} strokeWidth={3} />
+          <span>ELEGIR ESTE AUTO</span>
+        </button>
+      </div>
     </main>}
-    {stage==='circuits' && <main className="dc99-picker">
-      <div className="dc99-heading"><span>ETAPA 01</span><h1>ELEGÍ TU CIRCUITO</h1><p>Deslizá para explorar las pistas de Asunción.</p></div>
-      <SwipeDeck items={ASUNCION_CIRCUITS} selectedId={circuitId} onSelect={setCircuitId} label="Circuitos" renderItem={(item,active,i)=><div className="dc99-track-card" style={{'--dc99-track-accent':item.sky} as React.CSSProperties}>
-        <div className="dc99-track-art"><span className="dc99-track-number">PISTA {String(i+1).padStart(2,'0')}</span><div className="dc99-track-road"/><span className="dc99-track-difficulty">DIFICULTAD {item.difficulty.toFixed(1)}/10</span></div>
-        <h2>{item.name}</h2><p>{item.subtitle}</p><div className="dc99-stats"><span>{(item.distanceMeters/1000).toFixed(1)} KM</span><span>{item.zone}</span></div>{active&&<span className="dc99-selected"><Check size={13}/> SELECCIONADO</span>}
-      </div>}/>
-      <div className="dc99-actions"><button className="dc99-secondary" onClick={()=>setStage('home')}>ATRÁS</button><button className="dc99-primary" onClick={()=>setStage('garage')}>ELEGIR AUTO <ArrowRight size={17}/></button></div>
-    </main>}
-    {stage==='garage' && <main className="dc99-picker">
-      <div className="dc99-heading"><span>ETAPA 02</span><h1>SELECCIONÁ TU AUTO</h1><p>Deslizá para cambiar de vehículo.</p></div>
-      <SwipeDeck items={PRESET_VEHICLES} selectedId={playerId} onSelect={setPlayerId} label="Autos" renderItem={(item,active,i)=><div className="dc99-car-card">
-        <div className="dc99-car-frame"><span>VEHÍCULO {String(i+1).padStart(2,'0')}</span><img src={preview(item)} alt={`${item.brand} ${item.name}`}/></div>
-        <h2>{item.brand} {item.name}</h2><p>{item.trim}</p><div className="dc99-stats"><span>{item.powerHp} HP</span><span>{item.torqueNm} NM</span></div>{active&&<span className="dc99-selected"><Check size={13}/> SELECCIONADO</span>}
-      </div>}/>
-      <div className="dc11-garage-tools"><button onClick={()=>showVehicle(playerId)}><RotateCcw size={15}/> VER 360° / VIDEO</button><button onClick={()=>{setShowroomCarId(playerId);setShowSpecs(true);}}><Info size={15}/> FICHA TÉCNICA COMPLETA</button></div>
-      <div className="dc99-actions"><button className="dc99-secondary" onClick={()=>setStage('circuits')}>ATRÁS</button><button className="dc99-primary" onClick={()=>setStage('briefing')}>CONFIRMAR AUTO <ArrowRight size={17}/></button></div>
-    </main>}
-    {stage==='briefing'&&<main className="dc99-briefing">
-      <div className="dc99-heading"><span>ETAPA 03</span><h1>LISTO PARA CORRER</h1><p>Revisá tu selección y preparate para la largada.</p></div>
-      <div className="dc99-briefing-car"><img src={preview(car)} alt={`${car.brand} ${car.name}`}/><div><span>TU VEHÍCULO</span><h2>{car.brand} {car.name}</h2><p>{car.powerHp} HP · {car.torqueNm} Nm</p><button onClick={()=>setStage('garage')}>CAMBIAR AUTO</button></div></div>
-      <div className="dc99-briefing-track"><span>TU CIRCUITO</span><h2>{circuit.name}</h2><p>{circuit.distanceMeters} m · Dificultad {circuit.difficulty}/10</p><button onClick={()=>setStage('circuits')}>CAMBIAR CIRCUITO</button></div>
-      <div className="dc99-weather"><label htmlFor="dc99-weather">CLIMA</label><select id="dc99-weather" value={weather} onChange={e=>setWeather(e.target.value as WeatherMode)}>{WEATHER_OPTIONS.map(option=><option value={option.id} key={option.id}>{option.label}</option>)}</select></div>
-      <button className="dc99-primary dc99-start-race" onClick={beginRace}><FlagTriangleRight size={19}/> ¡EMPEZAR CARRERA!</button>
-    </main>}
-    {stage==='race'&&<main className="dc99-race-stage"><Race3DPerspectiveView key={`mobile-${circuitId}-${playerId}-${raceSession}`} manualStart experience="race" playerVehicleId={playerId} initialWeather={weather} vehicles={raceCars} track={track} simulationResults={baseResults} onExitRace={()=>setStage('briefing')} onRestartRace={()=>{setRaceSession(n=>n+1);setStage('race');}} onFinishRace={(newResults,newHazards,newWeather)=>{setResults(newResults??null);setHazards(newHazards??[]);setCompletedWeather(newWeather??weather);setStage('results');}}/></main>}
-    {stage==='results'&&<main className="dc99-results"><div className="dc99-heading"><span><Trophy size={16}/> CARRERA FINALIZADA</span><h1>RESULTADOS</h1><p>{circuit.name}</p></div><div className="dc99-results-body"><div className="dc99-results-hero"><img src={preview(car)} alt={`${car.brand} ${car.name}`}/><h2>{car.brand} {car.name}</h2><p>{podium.find(p=>p.vehicle.id===playerId)?.isDnf?'NO COMPLETÓ':`P${podium.find(p=>p.vehicle.id===playerId)?.finishPosition??'—'} · ${podium.find(p=>p.vehicle.id===playerId)?.finishTimeSec.toFixed(2)??'—'} S`}</p></div><div className="dc99-ranking">{podium.map((p,i)=><div key={p.vehicle.id}><b>{i+1}º</b><span>{p.vehicle.brand} {p.vehicle.name}</span><strong>{p.isDnf?'DNF':`${p.finishTimeSec.toFixed(2)}s`}</strong></div>)}{insights.length>0&&<small>Driving IQ calculado a partir de la telemetría de la carrera.</small>}</div></div><div className="dc99-actions"><button className="dc99-secondary" onClick={()=>setStage('home')}>MENÚ</button><button className="dc99-secondary" disabled={!results} onClick={()=>setStage('replay')}>REPETICIÓN</button><button className="dc99-secondary" onClick={()=>setShowAllResults(true)}>TODOS LOS DATOS</button><button className="dc99-primary" onClick={beginRace}><RotateCcw size={17}/> OTRA VEZ</button></div></main>}
+    {stage==='race'&&<main className="dc99-race-stage"><Race3DPerspectiveView key={`mobile-${circuitId}-${playerId}-${raceLaps}-${raceSession}`} manualStart experience="race" playerVehicleId={playerId} initialWeather={weather} vehicles={raceCars} track={track} simulationResults={baseResults} onExitRace={()=>setStage('briefing')} onRestartRace={()=>{setRaceSession(n=>n+1);setStage('race');}} onFinishRace={(newResults,newHazards,newWeather)=>{setResults(newResults??null);setHazards(newHazards??[]);setCompletedWeather(newWeather??weather);setStage('results');}}/></main>}
+
+    {stage==='results' && (
+      <main className="dc-arcade-stage flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-2 md:p-4" data-extended-label="TODOS LOS DATOS">
+        <ArcadeResultsStage
+          circuitName={circuit.name}
+          trackDistanceMeters={track.distanceMeters}
+          podium={podium}
+          assessments={insights}
+          playerId={playerId}
+          fallbackCar={car}
+          onBackToGarage={()=>setStage('garage')}
+          onRepeatRace={beginRace}
+          onWatchReplay={results?()=>setStage('replay'):undefined}
+          onShowAllData={()=>setShowAllResults(true)}
+        />
+      </main>
+    )}
     {stage==='replay'&&results&&<main className="dc99-race-stage dc99-replay"><button className="dc99-replay-back" onClick={()=>setStage('results')}><ArrowLeft size={15}/> RESULTADOS</button><Race3DPerspectiveView key={`mobile-replay-${circuitId}-${playerId}`} experience="replay" playerVehicleId={playerId} vehicles={raceCars} track={track} simulationResults={results} replayHazards={hazards} replayWeather={completedWeather} onFinishRace={()=>{}}/></main>}
     {stage==='compare'&&<main className="dc99-picker"><div className="dc99-heading"><span>MODO COMPARAR</span><h1>ELEGÍ 2 AUTOS</h1><p>Elegí dos autos; los seleccionados aparecen marcados. Después pulsá COMPARAR.</p></div><SwipeDeck items={PRESET_VEHICLES} selectedId={compareFocusId} onSelect={setCompareFocusId} label="Comparador" renderItem={(item)=> <div className="dc99-car-card"><div className="dc99-car-frame"><img src={preview(item)} alt={`${item.brand} ${item.name}`}/></div><h2>{item.brand} {item.name}</h2><p>{item.powerHp} HP · {item.torqueNm} Nm</p><button type="button" className="dc99-selected dc12-select-compare" onClick={event=>{event.stopPropagation();setCompareFocusId(item.id);toggleCompare(item.id);}}>{compareIds.includes(item.id)?'✓ SELECCIONADO · QUITAR':'+ SELECCIONAR PARA COMPARAR'}</button></div>}/><div className="dc11-garage-tools"><button onClick={()=>showVehicle(compareFocusId)}>GIRAR AUTO 360°</button><button onClick={()=>{setShowroomCarId(compareFocusId);setShowSpecs(true);}}>FICHA TÉCNICA</button></div>
       <div className="dc99-actions"><button className="dc99-secondary" onClick={()=>setStage('home')}>MENÚ</button><button className="dc99-primary" disabled={compareIds.length!==2} onClick={()=>{setCompareSimulation(true);setStage('compare-results');}}>COMPARAR {compareIds.length}/2 <ArrowRight size={16}/></button></div></main>}

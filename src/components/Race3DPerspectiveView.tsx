@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useMemo } from 'react';
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { Vehicle, RaceTrackConfig, VehicleRaceResult } from '../types/vehicle';
 import { 
   Play, 
@@ -26,6 +27,7 @@ import {
   ShieldAlert,
   CloudRain,
   ArrowLeft, ArrowRight, ArrowUp, ArrowDown, CircleStop, Maximize2, Smartphone, X,
+  MapPin, Timer, Gauge, ChevronLeft, ChevronRight, ChevronsUp, ChevronsDown, AlertCircle,
 } from 'lucide-react';
 import { soundEngine } from '../utils/soundEngine';
 import { canStartCountdown, raceStartupMessage } from '../utils/raceStartupGate';
@@ -52,6 +54,14 @@ import { chooseDirectorShot, DirectorShot } from '../utils/cinematicDirector';
 import { simulatedGear } from '../utils/powertrainDynamics';
 import { InteractiveRacePhysics, PHYSICS_STEP } from '../utils/interactiveRacePhysics';
 import type { TrackHazard, HazardKind } from '../utils/interactiveRacePhysics';
+import { createUrbanTrafficVisuals3D } from '../utils/urbanTrafficVisuals3D';
+import {
+  hasVerifiedBlindSpotAdas,
+  type BlindSpotFlankState,
+  type SpeedLimitZone,
+  type TrafficLightLiveState,
+  type TrafficRuleNotice,
+} from '../utils/urbanTrafficRules';
 import { 
   createAsphaltTexture,
   createAsphaltMicroRelief,
@@ -241,27 +251,49 @@ const ArcadeRaceHud: React.FC<{
 };
 
 
-/** Minimapa local: la ruta, rivales y meta comparten la geometría física real.
- * No emplea un recorrido dibujado a mano; se orienta al rumbo del auto.
+export const formatRaceStopwatch = (sec: number): string => {
+  if (isNaN(sec) || sec < 0) return '00:00.000';
+  const minutes = Math.floor(sec / 60);
+  const seconds = Math.floor(sec % 60);
+  const ms = Math.floor((sec * 1000) % 1000);
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+};
+
+/** Minimapa circular Mockup 5:
+ * Borde cian brillante, flecha dorada del jugador, trazado con glow, bandera a cuadros en la meta,
+ * y píldora inferior con POS. (dorado) y VUELTA.
  */
 const RaceMiniMap: React.FC<{
   path: CurvedRoadPath;
   player: { distance: number; lateralX?: number };
   opponents: { id: string; distance: number; lateralX?: number }[];
   playerId: string;
-}> = ({ path, player, opponents, playerId }) => {
+  playerRank?: number;
+  totalCars?: number;
+  currentLap?: number;
+  totalLaps?: number;
+}> = ({
+  path,
+  player,
+  opponents,
+  playerId,
+  playerRank = 2,
+  totalCars = 8,
+  currentLap = 2,
+  totalLaps = 3,
+}) => {
   const center = path.world(player.distance, player.lateralX ?? 0);
   const c = Math.cos(center.yaw), s = Math.sin(center.yaw);
   const project = (worldX: number, worldZ: number) => {
     const dx = worldX - center.x, dz = worldZ - center.z;
     const lateral = dx * c - dz * s;
     const forward = dx * s + dz * c;
-    return { x: 85 + lateral * .68, y: 121 - forward * .68 };
+    return { x: 58 + lateral * 0.44, y: 76 - forward * 0.44 };
   };
   const points: string[] = [];
-  const from = Math.max(0, player.distance - 65);
-  const to = Math.min(path.length, player.distance + 215);
-  for (let dist = from; dist <= to; dist += 5) {
+  const from = Math.max(0, player.distance - 75);
+  const to = Math.min(path.length, player.distance + 240);
+  for (let dist = from; dist <= to; dist += 6) {
     const sample = path.at(dist);
     const q = project(sample.x, sample.z);
     points.push(`${q.x.toFixed(1)},${q.y.toFixed(1)}`);
@@ -271,27 +303,222 @@ const RaceMiniMap: React.FC<{
   points.push(`${lastPoint.x.toFixed(1)},${lastPoint.y.toFixed(1)}`);
   const finish = path.world(path.length);
   const finishPoint = project(finish.x, finish.z);
-  const canShowFinish = path.length - player.distance < 250;
+  const canShowFinish = path.length - player.distance < 280;
+
   return (
-    <div className="dc100-race-map absolute left-4 bottom-5 z-20 pointer-events-none rounded-[22px] border border-cyan-400/30 bg-slate-950/90 p-2 shadow-[0_12px_45px_rgba(2,6,23,.7)] backdrop-blur-md">
-      <div className="text-[9px] font-black tracking-[.22em] uppercase text-cyan-300 pl-2 pt-0.5">Ruta · Asunción</div>
-      <svg viewBox="0 0 170 170" className="block w-[150px] h-[150px] sm:w-[170px] sm:h-[170px] overflow-hidden" aria-label="Minimapa de la carretera real y posición de rivales">
-        <circle cx="85" cy="85" r="80" fill="rgba(13,20,34,.70)" stroke="rgba(148,163,184,.18)" strokeWidth="1"/>
-        <polyline points={points.join(' ')} fill="none" stroke="rgba(148,163,184,.34)" strokeWidth="14" strokeLinejoin="round" strokeLinecap="round" />
-        <polyline points={points.join(' ')} fill="none" stroke="#dbeafe" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
-        {canShowFinish && <g transform={`translate(${finishPoint.x},${finishPoint.y})`}>
-          <circle r="7" fill="#f8fafc" stroke="#020617" strokeWidth="2"/><path d="M-4 -4 L4 4 M4 -4 L-4 4" stroke="#0f172a" strokeWidth="2"/>
-        </g>}
-        {opponents.filter(v => v.id !== playerId).map(v => {
-          const p = path.world(v.distance, v.lateralX ?? 0);
-          const xy = project(p.x, p.z);
-          return <circle key={v.id} cx={xy.x} cy={xy.y} r="4" fill="#fb923c" stroke="#0f172a" strokeWidth="1.3"/>;
-        })}
-        <g transform="translate(85,121)"><path d="M0 -12 L-7 8 L0 5 L7 8 Z" fill="#06d3f5" stroke="white" strokeWidth="1.2" /></g>
-      </svg>
-      <div className="flex justify-between px-2 pb-1 font-mono text-[10px] text-slate-300">
-        <span>{Math.round(player.distance)} m</span>
-        <span className="text-cyan-300">META {Math.round(path.length - player.distance)} m</span>
+    <div className="dc100-race-map dc-mockup5-minimap absolute top-2.5 left-2.5 sm:top-3 sm:left-3 z-30 pointer-events-none flex flex-col items-start select-none">
+      {/* 1. Minimapa circular con borde cian brillante */}
+      <div className="relative w-[110px] h-[110px] sm:w-[116px] sm:h-[116px] rounded-full border-2 border-[#00e5ff] bg-[#030914]/90 backdrop-blur-md shadow-[0_0_20px_rgba(0,229,255,0.7),inset_0_0_14px_rgba(0,229,255,0.22)] overflow-hidden flex items-center justify-center">
+        {/* Indicador brújula N con flecha hacia arriba */}
+        <div className="absolute top-1 inset-x-0 flex flex-col items-center pointer-events-none z-10">
+          <span className="text-[9px] font-black tracking-widest text-[#00e5ff] leading-none drop-shadow-[0_0_4px_#00e5ff]">N</span>
+          <div className="w-0 h-0 border-l-[3px] border-l-transparent border-r-[3px] border-r-transparent border-b-[4px] border-b-[#00e5ff] mt-0.5" />
+        </div>
+
+        <svg viewBox="0 0 116 116" className="w-full h-full block" aria-label="Minimapa circular">
+          {/* Anillos de cuadrícula de radar */}
+          <circle cx="58" cy="58" r="48" fill="none" stroke="rgba(0,229,255,0.09)" strokeWidth="1" strokeDasharray="3 3"/>
+          <circle cx="58" cy="58" r="28" fill="none" stroke="rgba(0,229,255,0.09)" strokeWidth="1"/>
+          
+          {/* Trazado base de pista */}
+          <polyline points={points.join(' ')} fill="none" stroke="rgba(15,23,42,0.85)" strokeWidth="12" strokeLinejoin="round" strokeLinecap="round" />
+          {/* Trazado neón cian brillante */}
+          <polyline points={points.join(' ')} fill="none" stroke="#00e5ff" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" className="drop-shadow-[0_0_6px_#00e5ff]" />
+          
+          {/* Bandera a cuadros en la meta */}
+          {canShowFinish && (
+            <g transform={`translate(${finishPoint.x},${finishPoint.y})`}>
+              <circle r="7" fill="#000" stroke="#00e5ff" strokeWidth="1.5"/>
+              <rect x="-4" y="-4" width="4" height="4" fill="#fff"/>
+              <rect x="0" y="-4" width="4" height="4" fill="#000"/>
+              <rect x="-4" y="0" width="4" height="4" fill="#000"/>
+              <rect x="0" y="0" width="4" height="4" fill="#fff"/>
+            </g>
+          )}
+
+          {/* Rivales */}
+          {opponents.filter(v => v.id !== playerId).map(v => {
+            const p = path.world(v.distance, v.lateralX ?? 0);
+            const xy = project(p.x, p.z);
+            return (
+              <g key={v.id} transform={`translate(${xy.x},${xy.y})`}>
+                <circle r="4" fill="#ff9900" stroke="#ffffff" strokeWidth="1.2" className="drop-shadow-[0_0_4px_#ff9900]" />
+              </g>
+            );
+          })}
+
+          {/* Flecha dorada indicando la posición y rumbo del jugador */}
+          <g transform="translate(58,76)">
+            <polygon points="0,-12 7,8 0,4 -7,8" fill="#ffb800" stroke="#ffffff" strokeWidth="1.4" className="drop-shadow-[0_0_8px_#ffb800]" />
+          </g>
+        </svg>
+      </div>
+
+      {/* Píldora inferior: POS. 2/8 (dorado) y VUELTA 2/3 */}
+      <div className="mt-1.5 w-[110px] sm:w-[116px] px-2.5 py-1 bg-[#030914]/90 backdrop-blur-md border border-cyan-400/40 rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.85)] flex flex-col gap-0.5">
+        <div className="flex items-center justify-between text-[10px] leading-tight font-black tracking-wider">
+          <span className="text-white/80">POS.</span>
+          <span className="text-[#ffb800] text-[13px] font-black italic drop-shadow-[0_0_6px_rgba(255,184,0,0.7)]">{playerRank}/{totalCars}</span>
+        </div>
+        <div className="flex items-center justify-between text-[10px] leading-tight font-black tracking-wider">
+          <span className="text-white/80">VUELTA</span>
+          <span className="text-cyan-300 text-[13px] font-black italic drop-shadow-[0_0_6px_rgba(0,229,255,0.7)]">{currentLap}/{totalLaps}</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/** Clúster digital arcade Mockup 5/6:
+ * Botones de cámara y pausa en cristal oscuro, arco semicircular de RPM (RPM x1000) con zona roja,
+ * velocidad en números gigantes 168 km/h y marcha en cuadro dorado 4.
+ */
+const Mockup5SpeedCluster: React.FC<{
+  speedKmh: number;
+  rpm: number;
+  gear: number;
+  onCycleCamera: () => void;
+  onPause: () => void;
+  onOpenDetailed?: () => void;
+}> = ({ speedKmh, rpm, gear, onCycleCamera, onPause, onOpenDetailed }) => {
+  const maxRpm = 8000;
+  const clampedRpm = Math.max(0, Math.min(maxRpm, rpm));
+  const ratio = clampedRpm / maxRpm;
+  const radius = 54;
+  const cx = 75;
+  const cy = 64;
+  const circumference = Math.PI * radius; // ~169.6
+  const strokeDashoffset = circumference * (1 - ratio);
+
+  return (
+    <div className="dc-mockup5-cluster-wrapper absolute top-2.5 right-2.5 sm:top-3 sm:right-3 z-30 flex flex-col items-end gap-1.5 select-none pointer-events-none">
+      {/* Botones superiores de cámara y pausa en cristal oscuro */}
+      <div className="flex items-center gap-2 pointer-events-auto">
+        <button
+          type="button"
+          onClick={onCycleCamera}
+          className="w-9 h-9 rounded-xl bg-[#030914]/85 backdrop-blur-md border border-cyan-400/40 text-cyan-300 flex items-center justify-center hover:bg-cyan-950/60 active:scale-95 transition-all shadow-[0_0_12px_rgba(0,0,0,0.7)] cursor-pointer"
+          aria-label="Cambiar vista de cámara"
+          title="Cambiar vista de cámara"
+        >
+          <Video size={17} />
+        </button>
+        <button
+          type="button"
+          onClick={onPause}
+          className="w-9 h-9 rounded-xl bg-[#030914]/85 backdrop-blur-md border border-cyan-400/40 text-cyan-300 flex items-center justify-center hover:bg-cyan-950/60 active:scale-95 transition-all shadow-[0_0_12px_rgba(0,0,0,0.7)] cursor-pointer"
+          aria-label="Pausa"
+          title="Pausa"
+        >
+          <Pause size={17} />
+        </button>
+      </div>
+
+      {/* Tacómetro / Velocímetro digital estilo arcade */}
+      <div className="dc11-mobile-speed dc-mockup5-cluster pointer-events-auto relative w-[164px] sm:w-[178px] rounded-2xl border border-cyan-400/50 bg-[#030914]/90 backdrop-blur-md px-3 pt-2 pb-2 shadow-[0_0_24px_rgba(0,229,255,0.28),inset_0_0_14px_rgba(0,229,255,0.08)] flex flex-col items-center">
+        {/* Semicírculo de RPM con escala 0-8 y zona roja 7-8 */}
+        <div className="relative w-[150px] h-[64px] overflow-visible">
+          <svg viewBox="0 0 150 68" className="w-full h-full overflow-visible">
+            <defs>
+              <linearGradient id="dcRpmGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#00e5ff" />
+                <stop offset="55%" stopColor="#22c55e" />
+                <stop offset="75%" stopColor="#eab308" />
+                <stop offset="90%" stopColor="#ef4444" />
+              </linearGradient>
+            </defs>
+            {/* Pista de fondo */}
+            <path
+              d={`M ${cx - radius},${cy} A ${radius},${radius} 0 0,1 ${cx + radius},${cy}`}
+              fill="none"
+              stroke="rgba(255,255,255,0.12)"
+              strokeWidth="7"
+              strokeLinecap="round"
+            />
+            {/* Zona roja indicativa en 7-8 */}
+            <path
+              d={`M ${cx + radius * Math.cos(Math.PI * 0.15)},${cy - radius * Math.sin(Math.PI * 0.15)} A ${radius},${radius} 0 0,1 ${cx + radius},${cy}`}
+              fill="none"
+              stroke="rgba(239,68,68,0.4)"
+              strokeWidth="7"
+              strokeLinecap="round"
+            />
+            {/* Arco dinámico de revoluciones */}
+            <path
+              d={`M ${cx - radius},${cy} A ${radius},${radius} 0 0,1 ${cx + radius},${cy}`}
+              fill="none"
+              stroke="url(#dcRpmGrad)"
+              strokeWidth="7"
+              strokeLinecap="round"
+              strokeDasharray={circumference}
+              strokeDashoffset={strokeDashoffset}
+              className="transition-all duration-75"
+            />
+            {/* Marcas numéricas 0 a 8 */}
+            {[0, 1, 2, 3, 4, 5, 6, 7, 8].map(i => {
+              const angle = Math.PI - (i / 8) * Math.PI;
+              const tr = radius + 9;
+              const tx = cx + tr * Math.cos(angle);
+              const ty = cy - tr * Math.sin(angle) + 2;
+              const isRed = i >= 7;
+              return (
+                <text
+                  key={i}
+                  x={tx}
+                  y={ty}
+                  textAnchor="middle"
+                  className={`text-[8px] font-mono font-bold ${isRed ? 'fill-red-400' : 'fill-slate-300'}`}
+                >
+                  {i}
+                </text>
+              );
+            })}
+          </svg>
+          {/* Texto RPM x1000 */}
+          <div className="absolute inset-x-0 bottom-0 flex justify-center">
+            <span className="text-[8px] font-mono font-bold tracking-widest text-slate-400 uppercase">
+              RPM x1000
+            </span>
+          </div>
+        </div>
+
+        {/* Fila: Velocidad en números gigantes + Marcha en cuadro dorado */}
+        <div className="mt-1 flex items-end justify-between w-full px-1">
+          {/* Velocidad en números gigantes 168 km/h */}
+          <div className="flex flex-col items-start leading-none">
+            <div className="flex items-baseline gap-1">
+              <strong className="font-display font-black italic text-[34px] sm:text-[38px] text-white tracking-tight leading-none tabular-nums drop-shadow-[0_0_10px_rgba(255,255,255,0.7)]">
+                {Math.round(speedKmh)}
+              </strong>
+            </div>
+            <span className="text-[10px] font-extrabold text-cyan-300 tracking-wider uppercase pl-0.5 -mt-0.5">
+              km/h
+            </span>
+          </div>
+
+          {/* Marcha en cuadro dorado 4 */}
+          <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-lg border-2 border-[#ffb800] bg-[#1a1202]/85 backdrop-blur-sm flex items-center justify-center shadow-[0_0_16px_rgba(255,184,0,0.55),inset_0_0_8px_rgba(255,184,0,0.25)]">
+            <span className="font-display font-black italic text-xl sm:text-2xl text-[#ffb800] drop-shadow-[0_0_6px_#ffb800] leading-none">
+              {gear === 0 ? 'R' : gear === -1 ? 'N' : gear}
+            </span>
+          </div>
+        </div>
+
+        {/* Pie de datos / compatibilidad de tests */}
+        <footer className="w-full flex items-center justify-between mt-1 pt-1 border-t border-cyan-500/20 text-[9px] text-slate-300">
+          <b>{gear === 0 ? 'R' : `${gear}ª`}</b>
+          <b>{Math.round(rpm)} RPM</b>
+          {onOpenDetailed && (
+            <button
+              type="button"
+              onClick={onOpenDetailed}
+              className="text-cyan-300 hover:text-white px-1.5 py-0.5 rounded bg-cyan-950/40 border border-cyan-500/30 font-bold text-[8px] tracking-wider"
+              aria-label="Ver telemetría completa"
+            >
+              DATOS +
+            </button>
+          )}
+        </footer>
       </div>
     </div>
   );
@@ -355,6 +582,18 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     <button type="button" key={control} aria-label={label} aria-pressed={!!touchPressed[control]}
       className={`dc-touch-button ${extra} ${touchPressed[control] ? 'dc-touch-active' : ''}`}
       onContextMenu={event => event.preventDefault()}
+      onTouchStart={event => {
+        event.stopPropagation();
+        setTouchControl(control, true);
+      }}
+      onTouchEnd={event => {
+        event.stopPropagation();
+        setTouchControl(control, false);
+      }}
+      onTouchCancel={event => {
+        event.stopPropagation();
+        setTouchControl(control, false);
+      }}
       onPointerDown={event => {
         event.preventDefault();
         if (touchPointersRef.current[control] !== null) return;
@@ -365,7 +604,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       onPointerUp={event => { if (touchPointersRef.current[control] === event.pointerId) { touchPointersRef.current[control] = null; setTouchControl(control, false); } }}
       onPointerCancel={event => { if (touchPointersRef.current[control] === event.pointerId) { touchPointersRef.current[control] = null; setTouchControl(control, false); } }}
       onLostPointerCapture={event => { if (touchPointersRef.current[control] === event.pointerId) { touchPointersRef.current[control] = null; setTouchControl(control, false); } }}>
-      {icon}<span>{label}</span>
+      {icon}<span className="sr-only">{label}</span>
     </button>
   );
   const enableLandscape = async () => {
@@ -421,7 +660,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
   const [potholeWarning, setPotholeWarning] = useState<PotholeLookahead | null>(null);
   const [steeringDemoDeg, setSteeringDemoDeg] = useState(0);
   const [headlightsOn, setHeadlightsOn] = useState(true);
-  const [showVehicleLabels, setShowVehicleLabels] = useState(experience !== 'race');
+  const [showVehicleLabels, setShowVehicleLabels] = useState(true);
   const [interactiveMode, setInteractiveMode] = useState(() => experience === 'race' || (experience === 'legacy' && track.distanceMeters <= 3500));
   const [hazardsEnabled, setHazardsEnabled] = useState(true);
   const [hazardCount, setHazardCount] = useState(0);
@@ -433,14 +672,36 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     setSelectedVehicleId(playerVehicleId || vehicles[0]?.id || '');
     setCameraMode(experience === 'replay' || experience === 'legacy' ? 'automatica' : 'arcade');
   }, [track.distanceMeters, experience, playerVehicleId]);
-  const roadPath = useMemo(() => makeRoadPath(track), [track.cityCircuitId, track.distanceMeters]);
+  const roadPath = useMemo(() => makeRoadPath(track), [track.cityCircuitId, track.distanceMeters, track.laps]);
   const [liveVehicleStates, setLiveVehicleStates] = useState<Record<string, { lateralX?: number, distance: number, speedKmh: number, accelG: number, gear: number, rpm: number, impacts: number, slip: number, pothole: boolean, absActive: boolean, tcsActive?: boolean, escActive?: boolean, aebActive?: boolean, fcwWarning?: boolean, laneDepartureWarning?: boolean }>>({});
   const [raceEvent, setRaceEvent] = useState('');
+  const [seatbeltBuckled, setSeatbeltBuckled] = useState(false);
+  const [activeSpeedZone, setActiveSpeedZone] = useState<SpeedLimitZone | null>(null);
+  const [upcomingTrafficLight, setUpcomingTrafficLight] = useState<(TrafficLightLiveState & { distanceToStopM: number }) | null>(null);
+  const [blindSpotState, setBlindSpotState] = useState<BlindSpotFlankState>({
+    equipped: false,
+    leftAlert: false,
+    rightAlert: false,
+    leftDistanceM: null,
+    rightDistanceM: null,
+  });
+  const [trafficNotice, setTrafficNotice] = useState<TrafficRuleNotice | null>(null);
+  const [splashHudActive, setSplashHudActive] = useState(false);
+  const lastNoticeSeqRef = useRef(0);
+  const lastSplashSeqRef = useRef(0);
+  const splashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const buckleSeatbelt = () => {
+    soundEngine.unlock();
+    soundEngine.playSeatbeltClick();
+    physicsRef.current?.setSeatbeltBuckled(true);
+    setSeatbeltBuckled(true);
+  };
   const [isGlbLoading, setIsGlbLoading] = useState<boolean>(() => vehicles.some((v) => hasVehicle3DModel(v.id)));
   const [loadedVehicleModels, setLoadedVehicleModels] = useState(0);
   const requiredVehicleModels = vehicles.filter(v => hasVehicle3DModel(v.id)).length;
   const [glbLoadError, setGlbLoadError] = useState<string | null>(null);
-  const raceGateReady = canStartCountdown({sceneRendered: visualReady, loadedModels: loadedVehicleModels, requiredModels: requiredVehicleModels, modelError: Boolean(glbLoadError)});
+  const raceGateReady = canStartCountdown({sceneRendered: visualReady, loadedModels: loadedVehicleModels, requiredModels: requiredVehicleModels, modelError: false});
+  const isPreloading = !raceGateReady;
 
   // Métricas de diagnóstico en tiempo real (GPU / Engine)
   const [diagStats, setDiagStats] = useState({
@@ -461,7 +722,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     selectedVehicleId: playerVehicleId || vehicles[0]?.id || '',
     steeringDemoDeg: 0,
     headlightsOn: true,
-    showVehicleLabels: experience !== 'race',
+    showVehicleLabels: true,
     maxRaceTimeSec: 15,
     interactiveMode: false,
   });
@@ -634,6 +895,11 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     setRaceEvent('');
     setRaceInsight(null);
     setGoFlash(false);
+    setSeatbeltBuckled(false);
+    setTrafficNotice(null);
+    setSplashHudActive(false);
+    lastNoticeSeqRef.current = 0;
+    lastSplashSeqRef.current = 0;
     insightSequenceRef.current = 0;
     lastUrgentInsightAtRef.current = 0;
     lastInsightIdRef.current = null;
@@ -649,8 +915,8 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       stateRef.current.isPlaying = true;
       return () => { soundEngine.stopAll(); };
     }
-    // En mobile la grilla debe permanecer quieta hasta pulsar START.
-    if (experience === 'race' && !startRequested) {
+    // Si la compuerta de preparación aún no ha habilitado la largada o está precargando, esperar
+    if (!startRequested || isPreloading) {
       setCountdown(null);
       stateRef.current.countdown = null;
       stateRef.current.isPlaying = false;
@@ -706,17 +972,16 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     };
   }, [track.id, vehicles, interactiveMode, hazardsEnabled, experience, restartSequence, manualStart, startRequested]);
 
-  // Flujo mobile único: INICIAR CARRERA -> precarga -> pista renderizada -> 3, 2, 1.
-  // No se exige un segundo toque START y ningún pitido ocurre antes del primer render.
+  // Compuerta universal de preparación: precarga 3D -> pista y modelos listos -> 3, 2, 1.
   useEffect(() => {
-    if (experience !== 'race' || !raceGateReady || startRequested) return;
+    if (!raceGateReady || startRequested) return;
     const timer = window.setTimeout(() => {
       soundEngine.unlock();
       stateRef.current.isPlaying = false;
       setStartRequested(true);
-    }, 1200);
+    }, 450);
     return () => window.clearTimeout(timer);
-  }, [experience, raceGateReady, startRequested]);
+  }, [raceGateReady, startRequested]);
 
   // DATACAR V9.6: cápsulas educativas durante la carrera. Máximo una cada
   // 5,2 segundos, calculadas desde el auto real de esta partida, no desde
@@ -807,6 +1072,14 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.25;
+
+    // Mapa de reflexión IBL estándar para los autos: se inyecta en los materiales de los autos
+    // sin asignarse a scene.environment, preservando el asfalto oscuro y la atmósfera original del circuito.
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+    const roomEnv = new RoomEnvironment();
+    const vehicleEnvTexture = pmremGenerator.fromScene(roomEnv, 0.04).texture;
+
     // Las sombras de contacto ya están dibujadas bajo cada auto. Evitar
     // renderizar tres carrocerías de alta densidad a un segundo shadow pass.
     renderer.shadowMap.enabled = false;
@@ -917,6 +1190,14 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       if ((experience !== 'race' && experience !== 'legacy') || isEditing(event.target) || event.altKey || event.ctrlKey || event.metaKey) return;
       const bounds = container.getBoundingClientRect();
       if (bounds.bottom < 0 || bounds.top > window.innerHeight) return;
+      if (event.code === 'KeyC') {
+        event.preventDefault();
+        soundEngine.unlock();
+        soundEngine.playSeatbeltClick();
+        physicsRef.current?.setSeatbeltBuckled(true);
+        setSeatbeltBuckled(true);
+        return;
+      }
       if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'KeyW', 'KeyS', 'Space'].includes(event.code)) {
         event.preventDefault();
         if (event.code === 'ArrowLeft') keyboardControlsRef.current.left = true;
@@ -949,16 +1230,19 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
     window.addEventListener('keyup', keyUp);
     window.addEventListener('blur', releaseKeys);
 
-    // 2. Iluminación automotriz equilibrada
-    const hemiLight = new THREE.HemisphereLight('#dbeafe', '#5f655e', 1.15);
+    // 2. Iluminación automotriz original equilibrada y luminosa
+    const ambientLight = new THREE.AmbientLight('#ffffff', 0.95);
+    scene.add(ambientLight);
+
+    const hemiLight = new THREE.HemisphereLight('#e0f2fe', '#64748b', 1.25);
     scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight('#ffffff', 2.1);
+    const keyLight = new THREE.DirectionalLight('#ffffff', 2.2);
     keyLight.position.set(25, 40, -15);
     keyLight.castShadow = false;
     scene.add(keyLight);
 
-    const fillLight = new THREE.DirectionalLight('#94a3b8', 0.9);
+    const fillLight = new THREE.DirectionalLight('#94a3b8', 1.1);
     fillLight.position.set(-25, 25, 20);
     scene.add(fillLight);
 
@@ -1138,11 +1422,28 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
 
     // 3B. Modo de carrera interactiva: obstáculos con representación y colisión real.
     const racePhysics = interactiveMode
-      ? new InteractiveRacePhysics(vehicles, track, stateRef.current.selectedVehicleId, hazardsEnabled)
+      ? new InteractiveRacePhysics(vehicles, track, stateRef.current.selectedVehicleId, hazardsEnabled, {
+          urbanTrafficRules: experience === 'race',
+        })
       : null;
     physicsRef.current = racePhysics;
     racePhysics?.setWeather(weatherModeRef.current);
     setHazardCount(racePhysics?.hazards.length ?? 0);
+    const urbanTrafficVisuals = racePhysics?.urbanRulesEnabled
+      ? createUrbanTrafficVisuals3D({
+          roadPath,
+          roadWidth,
+          trackDistanceMeters: track.distanceMeters,
+          laps: Math.max(1, track.laps ?? 1),
+          lights: racePhysics.trafficLights,
+          speedZones: racePhysics.speedZones,
+          oncomingCount: racePhysics.oncomingCars.length,
+        })
+      : null;
+    if (urbanTrafficVisuals) {
+      scene.add(urbanTrafficVisuals.group);
+      scene.add(urbanTrafficVisuals.splashGroup);
+    }
     const hazardsGroup = new THREE.Group();
     hazardsGroup.name = 'obstaculos_fisicos';
     trackGroup.add(hazardsGroup);
@@ -1250,7 +1551,8 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
           console.error(err);
           setGlbLoadError(`No se pudo cargar el modelo 3D de ${vehicle.name}`);
           setIsGlbLoading(false);
-        }
+        },
+        vehicleEnvTexture
       );
       entity.setNameplateVisible(stateRef.current.showVehicleLabels);
       scene.add(entity.group);
@@ -1412,6 +1714,18 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             soundEngine.playSuspensionHit(.28 + ownSuspension.impact * .72);
             lastRoadImpactAudioAt = livePhysics.time;
           }
+          if (livePhysics.lastWetSplash && livePhysics.lastWetSplash.seq !== lastSplashSeqRef.current) {
+            const splash = livePhysics.lastWetSplash;
+            lastSplashSeqRef.current = splash.seq;
+            const wp = roadPath.world(splash.z, splash.x);
+            urbanTrafficVisuals?.triggerSplash(wp.x, wp.z, splash.intensity);
+            if (splash.carId === selectedVehicleId) {
+              soundEngine.playWaterSplash(splash.intensity);
+              setSplashHudActive(true);
+              if (splashTimeoutRef.current !== null) clearTimeout(splashTimeoutRef.current);
+              splashTimeoutRef.current = setTimeout(() => setSplashHudActive(false), 780);
+            }
+          }
           stateRef.current.currentTimeSec = livePhysics.time;
         } else {
           stateRef.current.currentTimeSec += dt * playbackSpeed;
@@ -1464,6 +1778,22 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             setPotholeWarning(player && !livePhysics.playerFinished
               ? findUpcomingPothole(livePhysics.hazards, player, player.vehicle.dimensions.widthMm / 1000)
               : null);
+            if (livePhysics.urbanRulesEnabled && player && !livePhysics.playerFinished) {
+              setSeatbeltBuckled(livePhysics.seatbeltBuckled);
+              setActiveSpeedZone(livePhysics.getActiveSpeedZone(player.z));
+              setUpcomingTrafficLight(livePhysics.getUpcomingTrafficLight(player.z, 135));
+              setBlindSpotState(livePhysics.getBlindSpotState(selectedVehicleId));
+              const notice = livePhysics.lastTrafficNotice;
+              if (notice && notice.seq !== lastNoticeSeqRef.current) {
+                lastNoticeSeqRef.current = notice.seq;
+                setTrafficNotice(notice);
+                if (notice.kind === 'penalty' || notice.kind === 'warning') {
+                  soundEngine.playTrafficWarningTone(notice.kind === 'penalty');
+                }
+              } else if (notice && livePhysics.time - notice.createdAtSec > 4.2) {
+                setTrafficNotice(prev => (prev?.seq === notice.seq ? null : prev));
+              }
+            }
             const snapshot: typeof liveVehicleStates = {};
             for (const car of livePhysics.cars) {
               const kmh = Math.abs(car.speed) * 3.6;
@@ -1631,6 +1961,12 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       const selectedZ = selectedEntity?.group.position.z ?? centerZ;
       const currentWeather = weatherModeRef.current;
       weatherVisuals.update(currentWeather, dt, selectedX, selectedZ);
+      const activeUrbanPhysics = interactiveMode ? physicsRef.current : null;
+      urbanTrafficVisuals?.update(
+        activeUrbanPhysics?.time ?? stateRef.current.currentTimeSec,
+        dt,
+        activeUrbanPhysics?.oncomingCars ?? [],
+      );
       if (currentWeather !== lastWeatherApplied) {
         lastWeatherApplied = currentWeather;
         const wet = WEATHER_CONFIG[currentWeather].roadWetness;
@@ -1740,10 +2076,13 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
           const sideDistance = compact ? 8.2 : 9.4;
           targetSmoothRate = 9.2;
           wantedFov = compact ? 51 : 46;
+          // Si el auto está en la grilla de largada (|z| < 5m), adelantar levemente la cámara
+          // lateral para que el pilar del semáforo/pórtico (z=0) no corte el plano de visión.
+          const startGantryOffset = Math.abs(selectedZ) < 5 ? 2.6 : 0;
           _desiredCamPos.set(
-            selectedX + side * rightX * sideDistance - forwardX * 2.2,
+            selectedX + side * rightX * sideDistance - forwardX * (2.2 - startGantryOffset),
             compact ? 2.55 : 2.75,
-            selectedZ + side * rightZ * sideDistance - forwardZ * 2.2,
+            selectedZ + side * rightZ * sideDistance - forwardZ * (2.2 - startGantryOffset),
           );
           _camTarget.set(selectedX + forwardX * 0.7, 1.35, selectedZ + forwardZ * 0.7);
           break;
@@ -1929,6 +2268,11 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       potholeVisualKit.dispose();
       urbanEnvironment.userData.disposeTextureMaps?.();
       weatherVisuals.dispose();
+      if (splashTimeoutRef.current !== null) {
+        clearTimeout(splashTimeoutRef.current);
+        splashTimeoutRef.current = null;
+      }
+      urbanTrafficVisuals?.dispose();
       roadTex.dispose();
       kerbTex.dispose();
       trackGroup.traverse((obj) => {
@@ -1946,6 +2290,9 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
         }
       });
       asphaltRelief.dispose();
+      vehicleEnvTexture.dispose();
+      roomEnv.dispose();
+      pmremGenerator.dispose();
       renderer.dispose();
     };
   }, [track.id, vehicles, compact, track.distanceMeters, interactiveMode, hazardsEnabled, experience, replayHazards, roadPath]);
@@ -1966,6 +2313,46 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
       ? liveVehicleStates[selectedVehicle.id]
       : getInterpolatedVehicleState(selectedVehicle.id, currentTimeSec)
     : null;
+
+  const cycleCameraMode = () => {
+    const modes: CameraViewMode[] = ['arcade', 'trasera', 'lateral', 'cenital', 'libre'];
+    const currentIndex = modes.indexOf(cameraMode);
+    const nextMode = modes[(currentIndex + 1) % modes.length];
+    setCameraMode(nextMode);
+    stateRef.current.cameraMode = nextMode;
+  };
+
+  const totalCars = vehicles.length || 8;
+  const totalLaps = Math.max(1, track.laps ?? 1);
+
+  const playerRank = useMemo(() => {
+    if (!selectedVehicle || !liveVehicleStates[selectedVehicle.id]) return 2;
+    const playerDist = liveVehicleStates[selectedVehicle.id].distance;
+    let ahead = 0;
+    for (const [id, st] of Object.entries(liveVehicleStates)) {
+      if (id !== selectedVehicle.id && st.distance > playerDist) {
+        ahead++;
+      }
+    }
+    return 1 + ahead;
+  }, [selectedVehicle, liveVehicleStates]);
+
+  const currentLap = useMemo(() => {
+    if (!selectedVehicle || !liveVehicleStates[selectedVehicle.id] || !track) return 1;
+    const dist = liveVehicleStates[selectedVehicle.id].distance;
+    const lapDist = Math.max(1, track.distanceMeters / totalLaps);
+    return Math.min(totalLaps, Math.max(1, Math.floor(dist / lapDist) + 1));
+  }, [selectedVehicle, liveVehicleStates, track, totalLaps]);
+
+  const dynamicDrivingFeedback = useMemo(() => {
+    if (raceInsight?.message) return raceInsight.message;
+    if (!selectedVehicleState) return '¡Buen ritmo! Mantén la velocidad.';
+    if (selectedVehicleState.speedKmh > 140) return '¡Velocidad punta alcanzada! Sostené el trazado.';
+    if (touchPressed.throttle || steeringKeysRef.current.throttle) return '¡Aceleración a pleno! Controlá la salida.';
+    if (touchPressed.brake || steeringKeysRef.current.brake) return 'Frenado medido. Preparate para la curva.';
+    if (touchPressed.left || touchPressed.right || steeringKeysRef.current.left || steeringKeysRef.current.right) return 'Viraje preciso. Mantén la línea ideal.';
+    return '¡Buen ritmo! Mantén la velocidad.';
+  }, [raceInsight, selectedVehicleState, touchPressed]);
 
   return (
     <div className={`relative bg-[#0a0f1d] border border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col select-none ${experience === 'race' ? 'dc-mobile-race' : ''}`}>
@@ -2138,7 +2525,9 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             onRestartRace(); // Mobile y desktop desmontan la escena anterior.
           } else {
             // Respaldo para integraciones que todavía no pasan el callback.
-            const rebuilt = new InteractiveRacePhysics(vehicles, track, stateRef.current.selectedVehicleId, hazardsEnabled);
+            const rebuilt = new InteractiveRacePhysics(vehicles, track, stateRef.current.selectedVehicleId, hazardsEnabled, {
+              urbanTrafficRules: experience === 'race',
+            });
             physicsRef.current = rebuilt;
             rebuilt.setWeather(weatherModeRef.current);
             raceHazardsSnapshotRef.current = rebuilt.hazards.map(h => ({...h}));
@@ -2155,26 +2544,315 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
         {experience === 'race' && !startRequested && <div className="dc11-start-gate" role="status" aria-live="polite">
           <div className="dc11-start-card"><span>DATACAR ARENA · GRILLA DE SALIDA</span>
             <h2>{glbLoadError ? 'ERROR DE CARGA' : raceGateReady ? 'PREPARATE PARA LA LARGADA' : 'PREPARANDO PISTA Y AUTOS…'}</h2>
-            <p>{raceStartupMessage({sceneRendered: visualReady, loadedModels: loadedVehicleModels, requiredModels: requiredVehicleModels, modelError: Boolean(glbLoadError)})}</p>
-            {glbLoadError && <button type="button" onClick={() => onRestartRace?.()} className="mt-3 rounded-lg bg-sky-400 px-4 py-2 font-bold text-slate-950">REINTENTAR CARGA</button>}
+            {glbLoadError && (
+              <div className="mt-3 flex flex-wrap gap-2 justify-center">
+                <button type="button" onClick={() => onRestartRace?.()} className="rounded-lg bg-slate-800 border border-slate-600 px-4 py-2 font-bold text-white hover:bg-slate-700">REINTENTAR CARGA</button>
+                <button type="button" onClick={() => { setGlbLoadError(null); setLoadedVehicleModels(requiredVehicleModels); }} className="rounded-lg bg-amber-400 px-4 py-2 font-bold text-slate-950 hover:bg-amber-300">LARGAR CON RESCATE 3D</button>
+              </div>
+            )}
           </div>
         </div>}
-        {experience === 'race' && !hasFinished && <div className="dc-mobile-controls" aria-label="Controles táctiles de conducción">
-          <div className="dc-touch-steering">
-            {touchButton('left', 'Izquierda', <ArrowLeft size={26} strokeWidth={3}/>)}
-            {touchButton('right', 'Derecha', <ArrowRight size={26} strokeWidth={3}/>)}
+        {experience === 'race' && !hasFinished && (
+          <div className="dc-mobile-controls dc-mockup5-controls lg:hidden" aria-label="Controles táctiles de conducción">
+            {/* Lado izquierdo: Botones biselados de dirección < y > en color cian brillante para el pulgar izquierdo */}
+            <div className="dc-touch-steering">
+              {touchButton(
+                'left',
+                'Izquierda',
+                <div className="skew-x-[12deg] flex items-center justify-center pointer-events-none">
+                  <ChevronLeft size={34} strokeWidth={3} className="text-white drop-shadow-[0_0_8px_#00e5ff]" />
+                </div>,
+                'dc-touch-rhomboid dc-touch-left'
+              )}
+              {touchButton(
+                'right',
+                'Derecha',
+                <div className="skew-x-[12deg] flex items-center justify-center pointer-events-none">
+                  <ChevronRight size={34} strokeWidth={3} className="text-white drop-shadow-[0_0_8px_#00e5ff]" />
+                </div>,
+                'dc-touch-rhomboid dc-touch-right'
+              )}
+            </div>
+
+            {/* Lado derecho: Botón vertical alargado dorado con doble chevron >> para ACELERAR. Al lado, botón de FRENO (!) y botón de REVERSA R \/ */}
+            <div className="dc-touch-pedals">
+              {/* Botón de freno y botón de reversa apilados */}
+              <div className="flex flex-col gap-2">
+                {touchButton(
+                  'brake',
+                  'Freno',
+                  <div className="flex flex-col items-center justify-center pointer-events-none">
+                    <div className="flex items-center gap-0.5 text-white font-mono font-black text-sm tracking-tighter">
+                      <span>(</span>
+                      <AlertCircle size={14} className="text-amber-300" />
+                      <span>)</span>
+                    </div>
+                    <div className="mt-1 flex gap-1 opacity-60">
+                      <div className="w-1.5 h-0.5 bg-white -skew-x-[30deg]" />
+                      <div className="w-1.5 h-0.5 bg-white -skew-x-[30deg]" />
+                      <div className="w-1.5 h-0.5 bg-white -skew-x-[30deg]" />
+                    </div>
+                  </div>,
+                  'dc-touch-brake dc-touch-brake-pedal'
+                )}
+                {touchButton(
+                  'reverse',
+                  'Frenar / reversa',
+                  <div className="flex flex-col items-center justify-center pointer-events-none">
+                    <span className="font-display font-black text-sm text-white tracking-wider leading-none">R</span>
+                    <ChevronsDown size={14} className="text-cyan-300 -mt-0.5" />
+                  </div>,
+                  'dc-touch-reverse dc-touch-reverse-pedal'
+                )}
+              </div>
+
+              {/* Botón vertical alargado dorado >> para ACELERAR */}
+              {touchButton(
+                'throttle',
+                'Acelerar',
+                <div className="flex flex-col items-center justify-between h-full py-2.5 pointer-events-none">
+                  <ChevronsUp size={34} strokeWidth={3} className="text-[#ffb800] drop-shadow-[0_0_10px_#ffb800]" />
+                  <div className="flex flex-col gap-1 items-center opacity-70">
+                    <div className="w-6 h-0.5 bg-[#ffb800] -skew-x-[30deg]" />
+                    <div className="w-6 h-0.5 bg-[#ffb800] -skew-x-[30deg]" />
+                    <div className="w-6 h-0.5 bg-[#ffb800] -skew-x-[30deg]" />
+                  </div>
+                </div>,
+                'dc-touch-throttle dc-touch-gold-throttle'
+              )}
+            </div>
           </div>
-          <div className="dc-touch-pedals">
-            {touchButton('reverse', 'Frenar / reversa', <ArrowDown size={24} strokeWidth={3}/>, 'dc-touch-reverse')}
-            {touchButton('brake', 'Freno', <CircleStop size={23} strokeWidth={2.5}/>, 'dc-touch-brake')}
-            {touchButton('throttle', 'Acelerar', <ArrowUp size={28} strokeWidth={3}/>, 'dc-touch-throttle')}
-          </div>
-        </div>}
-        {experience === 'race' && !hasFinished && selectedVehicle && liveVehicleStates[selectedVehicle.id] && (
-          <RaceMiniMap path={roadPath} player={liveVehicleStates[selectedVehicle.id]}
-            opponents={Object.entries(liveVehicleStates).map(([id, st]) => ({ id, distance: st.distance, lateralX: st.lateralX }))}
-            playerId={selectedVehicle.id} />
         )}
+
+        {/* 1. ESQUINA SUPERIOR IZQUIERDA: Minimapa circular con borde cian brillante y píldora inferior POS / VUELTA */}
+        {experience === 'race' && !hasFinished && selectedVehicle && liveVehicleStates[selectedVehicle.id] && (
+          <RaceMiniMap
+            path={roadPath}
+            player={liveVehicleStates[selectedVehicle.id]}
+            opponents={Object.entries(liveVehicleStates).map(([id, st]) => ({ id, distance: st.distance, lateralX: st.lateralX }))}
+            playerId={selectedVehicle.id}
+            playerRank={playerRank}
+            totalCars={totalCars}
+            currentLap={currentLap}
+            totalLaps={totalLaps}
+          />
+        )}
+
+        {/* 2. CENTRO SUPERIOR: Logo central DATACAR ARENA y Píldora de circuito (Circuito Costanera | tiempo) */}
+        {experience === 'race' && !hasFinished && (
+          <div className="dc-mockup5-center-header absolute top-2.5 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex flex-col items-center select-none max-w-[360px]">
+            {/* Logo Central: DATACAR /// ARENA */}
+            <div className="flex items-center gap-1.5 px-3.5 py-0.5 bg-black/60 backdrop-blur-md rounded-t-lg border-t border-x border-cyan-500/30">
+              <span className="font-display font-black italic text-[13px] sm:text-[15px] tracking-wider text-white">DATACAR</span>
+              <span className="font-display font-black italic text-[12px] sm:text-[14px] text-[#ffb800]">///</span>
+              <span className="font-display font-black italic text-[13px] sm:text-[15px] tracking-wider text-[#ffb800]">ARENA</span>
+            </div>
+            <div className="w-28 sm:w-36 h-[2px] bg-gradient-to-r from-transparent via-[#00e5ff] to-transparent shadow-[0_0_8px_#00e5ff]" />
+
+            {/* Píldora de circuito: MapPin + Circuito Costanera | Timer + 01:24.637 */}
+            <div className="mt-1 flex items-center gap-2 sm:gap-2.5 px-3.5 py-1 bg-[#030914]/85 backdrop-blur-md border border-cyan-400/40 rounded-full shadow-[0_0_15px_rgba(0,229,255,0.25)] text-xs text-white">
+              <div className="flex items-center gap-1 font-bold text-slate-100 text-[10px] sm:text-[11px] tracking-wide whitespace-nowrap">
+                <MapPin size={12} className="text-[#00e5ff] shrink-0" />
+                <span>{track?.name ?? 'Circuito Costanera'}</span>
+              </div>
+              <span className="text-cyan-400/50">|</span>
+              <div className="flex items-center gap-1 font-mono font-black text-cyan-300 text-[11px] sm:text-[12px] tracking-wider tabular-nums">
+                <Timer size={12} className="text-[#00e5ff] shrink-0" />
+                <span>{formatRaceStopwatch(currentTimeSec)}</span>
+              </div>
+            </div>
+
+            {/* Tarjetas viales de Límite MÁX / MÍN + Semáforo próximo + Cinturón de Seguridad */}
+            <div className="mt-1.5 flex flex-wrap items-center justify-center gap-1.5 pointer-events-auto">
+              {/* Tarjeta reglamentaria Velocidad MÁXIMA y MÍNIMA */}
+              {activeSpeedZone && (() => {
+                const curSpeed = selectedVehicleState?.speedKmh ?? 0;
+                const overMax = curSpeed > activeSpeedZone.maxKmh + 5;
+                const underMin = curSpeed > 4 && curSpeed < activeSpeedZone.minKmh - 4 && (!upcomingTrafficLight || upcomingTrafficLight.phase === 'green');
+                return (
+                  <div
+                    className={`flex items-center gap-1.5 rounded-xl border px-2 py-1 bg-[#06101d]/95 shadow-lg ${
+                      overMax
+                        ? 'border-rose-400 ring-1 ring-rose-500/60'
+                        : underMin
+                          ? 'border-amber-400/80'
+                          : 'border-slate-700/90'
+                    }`}
+                    aria-label={`Límite máximo ${activeSpeedZone.maxKmh} y mínimo ${activeSpeedZone.minKmh} kilómetros por hora`}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span className="inline-flex h-6 w-6 items-center justify-center rounded-full border-[2.5px] border-rose-500 bg-white text-[10px] font-black text-slate-950 tabular-nums leading-none">
+                        {activeSpeedZone.maxKmh}
+                      </span>
+                      <span className="text-[9px] font-black uppercase tracking-wider text-rose-300 hidden sm:inline">
+                        MÁX
+                      </span>
+                    </div>
+                    <span className="h-4 w-[1px] bg-slate-700" />
+                    <div className="flex items-center gap-1">
+                      <span className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/85 bg-sky-600 text-[10px] font-black text-white tabular-nums leading-none">
+                        {activeSpeedZone.minKmh}
+                      </span>
+                      <span className="text-[9px] font-black uppercase tracking-wider text-sky-300 hidden sm:inline">
+                        MÍN
+                      </span>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Indicador de Semáforo Próximo */}
+              {upcomingTrafficLight && upcomingTrafficLight.distanceToStopM >= -2 && (
+                <div
+                  className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1 bg-[#06101d]/95 shadow-lg text-[10px] font-black uppercase tracking-wide ${
+                    upcomingTrafficLight.phase === 'red'
+                      ? 'border-rose-500/90 text-rose-200'
+                      : upcomingTrafficLight.phase === 'yellow'
+                        ? 'border-amber-400/90 text-amber-200'
+                        : 'border-emerald-500/70 text-emerald-200'
+                  }`}
+                >
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-slate-950 px-1.5 py-0.5 border border-slate-800">
+                    <span className={`h-2 w-2 rounded-full ${upcomingTrafficLight.phase === 'red' ? 'bg-rose-500 shadow-[0_0_6px_#f43f5e]' : 'bg-rose-950'}`} />
+                    <span className={`h-2 w-2 rounded-full ${upcomingTrafficLight.phase === 'yellow' ? 'bg-amber-400 shadow-[0_0_6px_#fbbf24]' : 'bg-amber-950'}`} />
+                    <span className={`h-2 w-2 rounded-full ${upcomingTrafficLight.phase === 'green' ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-emerald-950'}`} />
+                  </span>
+                  <span className="tabular-nums">
+                    {Math.max(0, Math.round(upcomingTrafficLight.distanceToStopM))}m
+                  </span>
+                  <span>
+                    {upcomingTrafficLight.phase === 'red'
+                      ? '¡FRENÁ!'
+                      : upcomingTrafficLight.phase === 'yellow'
+                        ? 'PRECAUCIÓN'
+                        : 'VERDE'}
+                  </span>
+                </div>
+              )}
+
+              {/* Botón interactivo de Cinturón de Seguridad [C] */}
+              <button
+                type="button"
+                onClick={buckleSeatbelt}
+                aria-pressed={seatbeltBuckled}
+                title="Abrochar cinturón de seguridad (Tecla C)"
+                className={`inline-flex items-center gap-1 rounded-xl border px-2.5 py-1 text-[10px] font-black uppercase tracking-wider transition-colors cursor-pointer ${
+                  seatbeltBuckled
+                    ? 'border-emerald-500/65 bg-emerald-950/90 text-emerald-200'
+                    : 'border-amber-400 bg-amber-950/95 text-amber-200 animate-pulse'
+                }`}
+              >
+                <span>{seatbeltBuckled ? '✓ CINTURÓN OK' : '🔒 ABROCHAR CINTURÓN [C]'}</span>
+              </button>
+            </div>
+
+            {/* Banner de aviso / penalización vial en vivo */}
+            {trafficNotice && (
+              <div
+                role="status"
+                className={`mt-1.5 rounded-xl border px-3 py-1 text-center shadow-xl pointer-events-none ${
+                  trafficNotice.kind === 'penalty'
+                    ? 'border-rose-400 bg-rose-950/95 text-rose-100'
+                    : trafficNotice.kind === 'ok'
+                      ? 'border-emerald-400 bg-emerald-950/95 text-emerald-100'
+                      : 'border-amber-400 bg-amber-950/95 text-amber-100'
+                }`}
+              >
+                <div className="text-[11px] font-black uppercase tracking-wide">
+                  {trafficNotice.title}
+                </div>
+                <div className="text-[10px] font-medium opacity-90">
+                  {trafficNotice.subtitle}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 2B. SENSORES ADAS DE PUNTO CIEGO LATERAL (IZQUIERDA / DERECHA — solo modelos con ADAS verificado) */}
+        {experience === 'race' && !hasFinished && selectedVehicle && hasVerifiedBlindSpotAdas(selectedVehicle) && (
+          <>
+            <div
+              aria-live="polite"
+              className={`pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 z-30 flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-opacity duration-150 ${
+                blindSpotState.leftAlert
+                  ? 'border-amber-300 bg-amber-950/95 text-amber-200 opacity-100 shadow-[0_0_20px_rgba(251,191,36,0.65)]'
+                  : 'border-cyan-500/25 bg-[#050f1d]/80 text-slate-400 opacity-55'
+              }`}
+            >
+              <span
+                className={`h-3.5 w-3.5 rounded-full ${
+                  blindSpotState.leftAlert
+                    ? 'bg-amber-400 shadow-[0_0_12px_#fbbf24] animate-ping'
+                    : 'bg-slate-600'
+                }`}
+              />
+              <div className="leading-tight">
+                <div className="text-[9px] font-black uppercase tracking-widest">
+                  ◀ ADAS IZQ
+                </div>
+                <div className="text-[10px] font-mono font-bold tabular-nums">
+                  {blindSpotState.leftAlert
+                    ? `AUTO ${blindSpotState.leftDistanceM ?? ''}m`
+                    : 'LIBRE'}
+                </div>
+              </div>
+            </div>
+
+            <div
+              aria-live="polite"
+              className={`pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 z-30 flex items-center gap-2 rounded-xl border px-2.5 py-2 transition-opacity duration-150 ${
+                blindSpotState.rightAlert
+                  ? 'border-amber-300 bg-amber-950/95 text-amber-200 opacity-100 shadow-[0_0_20px_rgba(251,191,36,0.65)]'
+                  : 'border-cyan-500/25 bg-[#050f1d]/80 text-slate-400 opacity-55'
+              }`}
+            >
+              <div className="leading-tight text-right">
+                <div className="text-[9px] font-black uppercase tracking-widest">
+                  ADAS DER ▶
+                </div>
+                <div className="text-[10px] font-mono font-bold tabular-nums">
+                  {blindSpotState.rightAlert
+                    ? `AUTO ${blindSpotState.rightDistanceM ?? ''}m`
+                    : 'LIBRE'}
+                </div>
+              </div>
+              <span
+                className={`h-3.5 w-3.5 rounded-full ${
+                  blindSpotState.rightAlert
+                    ? 'bg-amber-400 shadow-[0_0_12px_#fbbf24] animate-ping'
+                    : 'bg-slate-600'
+                }`}
+              />
+            </div>
+          </>
+        )}
+
+        {/* 2C. EFECTO VISUAL DE SALPICADURA DE AGUA EN PARABRISAS AL CAER EN BACHE MOJADO */}
+        {experience === 'race' && !hasFinished && splashHudActive && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-32 z-20 flex items-end justify-center pb-20 bg-[radial-gradient(ellipse_at_25%_95%,rgba(125,211,252,0.34),transparent_48%),radial-gradient(ellipse_at_75%_95%,rgba(125,211,252,0.34),transparent_48%)]"
+          >
+            <span className="rounded-full border border-sky-300/60 bg-sky-950/90 px-3 py-0.5 text-[10px] font-black uppercase tracking-widest text-sky-200">
+              💦 Salpicadura en calzada mojada
+            </span>
+          </div>
+        )}
+
+        {/* 5. CENTRO INFERIOR: Píldora flotante translúcida de Driving IQ con feedback dinámico */}
+        {experience === 'race' && !hasFinished && (
+          <div className="dc-mockup5-driving-iq absolute bottom-3.5 md:bottom-14 left-1/2 -translate-x-1/2 z-30 pointer-events-none select-none max-w-[min(420px,calc(100vw-540px))]">
+            <div className="flex items-center gap-2 px-3.5 sm:px-4 py-1.5 bg-[#030914]/90 backdrop-blur-md border border-[#00e5ff]/50 rounded-full shadow-[0_0_18px_rgba(0,229,255,0.35)] text-white w-full overflow-hidden">
+              <Gauge size={15} className="text-[#00e5ff] shrink-0 drop-shadow-[0_0_5px_#00e5ff]" />
+              <span className="text-[11px] sm:text-xs font-semibold text-slate-100 tracking-wide truncate">
+                {dynamicDrivingFeedback}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Alertas de asistencia activa */}
         {experience === 'race' && !hasFinished && selectedVehicle && (
           <div className="absolute top-4 right-4 z-20 pointer-events-none flex flex-col items-end gap-1 font-mono text-[10px] font-bold">
             {liveVehicleStates[selectedVehicle.id]?.fcwWarning && !liveVehicleStates[selectedVehicle.id]?.aebActive && <span className="rounded-md border border-amber-400 bg-amber-500/20 px-2 py-1 text-amber-100">ALERTA DE COLISIÓN</span>}
@@ -2182,13 +2860,26 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             {liveVehicleStates[selectedVehicle.id]?.aebActive && <span className="rounded-md border border-red-400 bg-red-500/20 px-2 py-1 text-red-200">FRENADO AUTOMÁTICO</span>}
           </div>
         )}
+
+        {/* 3. ESQUINA SUPERIOR DERECHA: Botones de cámara y pausa en cristal oscuro + Tacómetro/Velocímetro digital arcade */}
         {experience === 'race' && !hasFinished && selectedVehicle && selectedVehicleState && (
           <>
-            <div className="dc11-mobile-speed" aria-label="Velocidad y revoluciones actuales">
-              <span>VELOCIDAD</span><div><strong>{Math.round(selectedVehicleState.speedKmh)}</strong><small>KM/H</small></div>
-              <footer><b>{selectedVehicleState.gear===0?'R':`${selectedVehicleState.gear}ª`}</b><b>{selectedVehicleState.rpm} RPM</b><button onClick={()=>setShowDetailedHud(true)} aria-label="Ver telemetría completa">DATOS +</button></footer>
+            <div className="dc-mobile-speed-wrapper lg:hidden">
+              <Mockup5SpeedCluster
+                speedKmh={selectedVehicleState.speedKmh}
+                rpm={selectedVehicleState.rpm}
+                gear={selectedVehicleState.gear}
+                onCycleCamera={cycleCameraMode}
+                onPause={() => {
+                  soundEngine.unlock();
+                  setMobileMenuOpen(true);
+                  setIsPlaying(false);
+                  stateRef.current.isPlaying = false;
+                }}
+                onOpenDetailed={() => setShowDetailedHud(true)}
+              />
             </div>
-            <div className="dc11-desktop-hud"><ArcadeRaceHud vehicle={selectedVehicle} state={selectedVehicleState}/></div>
+            <div className="dc11-desktop-hud hidden lg:block"><ArcadeRaceHud vehicle={selectedVehicle} state={selectedVehicleState}/></div>
             {showDetailedHud && <div className="dc11-hud-backdrop" role="dialog" aria-label="Telemetría extendida">
               <button className="dc11-hud-close" onClick={()=>setShowDetailedHud(false)}><X size={17}/> VOLVER A CARRERA</button>
               <div className="dc11-hud-gauge"><ArcadeRaceHud vehicle={selectedVehicle} state={selectedVehicleState}/></div>
@@ -2197,7 +2888,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
           </>
         )}
         {experience === 'race' && !hasFinished && countdown === null && raceInsight && (
-          <div key={raceInsight.id} className={`dc100-race-insight absolute top-[96px] left-3 z-20 pointer-events-none w-[min(320px,calc(100%-24px))] rounded-xl border border-l-[3px] px-3 py-2.5 shadow-xl backdrop-blur-lg ${
+          <div key={raceInsight.id} className={`dc100-race-insight absolute top-[260px] left-3 z-20 pointer-events-none w-[min(290px,calc(100%-24px))] rounded-xl border border-l-[3px] px-3 py-2.5 shadow-xl backdrop-blur-lg hidden md:block select-none ${
             raceInsight.kind === 'warning'
               ? 'border-amber-500/45 border-l-amber-400 bg-slate-950/85'
               : raceInsight.kind === 'event'
@@ -2210,18 +2901,34 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             <div className="mt-1.5 text-[9px] text-slate-500">Ficha técnica + telemetría virtual · no ensayo oficial</div>
           </div>
         )}
+
+        {/* ALERTA CENTRAL DE BACHE EN CALZADA (HUD Arcade Central) */}
         {experience === 'race' && !hasFinished && potholeWarning && (
-          <div className="absolute bottom-[224px] left-4 z-20 pointer-events-none rounded-lg border border-amber-400/35 bg-slate-950/80 px-3 py-2 shadow-lg backdrop-blur-sm" aria-label="Advertencia de calzada dañada">
-            <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-wider text-amber-300">
-              <ShieldAlert className="h-4 w-4" /> Bache en tu trayectoria
-            </div>
-            <div className="mt-0.5 font-mono text-[12px] font-bold text-white tabular-nums">
-              {Math.round(potholeWarning.distanceM)} m <span className="ml-2 text-[10px] font-normal text-slate-400">Reducí velocidad o esquivalo</span>
+          <div
+            className="absolute top-20 sm:top-24 left-1/2 -translate-x-1/2 z-40 pointer-events-none flex flex-col items-center select-none"
+            role="alert"
+            aria-label="Advertencia de bache en la calzada"
+          >
+            <div className="flex items-center gap-2.5 sm:gap-3 px-4 sm:px-6 py-2 sm:py-2.5 rounded-2xl bg-gradient-to-r from-amber-950/90 via-red-950/95 to-amber-950/90 border-2 border-amber-400 shadow-[0_0_28px_rgba(245,158,11,0.7),inset_0_0_12px_rgba(239,68,68,0.35)] backdrop-blur-md animate-pulse">
+              <ShieldAlert className="h-5 w-5 sm:h-6 sm:w-6 text-amber-300 shrink-0 drop-shadow-[0_0_8px_#f59e0b] animate-bounce" />
+              <div className="flex flex-col text-left">
+                <div className="flex items-center gap-2">
+                  <span className="font-display font-black italic text-xs sm:text-sm tracking-wider text-amber-200 uppercase drop-shadow-[0_0_6px_rgba(245,158,11,0.8)]">
+                    ¡BACHE EN CALZADA A {Math.round(potholeWarning.distanceM)}m!
+                  </span>
+                </div>
+                <span className="text-[10px] sm:text-[11px] font-mono font-bold text-slate-200 tracking-wide">
+                  Reducí velocidad o esquivalo por los lados
+                </span>
+              </div>
             </div>
           </div>
         )}
-        <div className={`absolute ${experience === 'race' ? 'bottom-3 left-[210px] max-w-[32%]' : 'bottom-3 left-3'} z-20 pointer-events-none px-3 py-1.5 text-[10px] text-slate-200 font-mono bg-slate-950/80 border border-slate-600/40 rounded-lg backdrop-blur-sm flex gap-3 flex-wrap`}>
-          <span>{experience === 'race' ? '↑ Acelerar · ↓ Frenar / Reversa · Espacio Freno · ← → Dirección · Cámara detrás de TU auto' : experience === 'replay' ? 'Director TV · repetición real' : 'Comparación automática'}</span><span>Arrastrá: cámara libre</span><span>Dos dedos: girar / zoom</span>
+
+        <div className={`absolute bottom-2.5 left-1/2 -translate-x-1/2 z-20 pointer-events-none px-3.5 py-1 text-[10px] text-slate-300 font-mono bg-slate-950/85 border border-slate-700/60 rounded-xl backdrop-blur-md shadow-lg hidden md:flex items-center gap-3 whitespace-nowrap select-none max-w-[90vw] overflow-x-auto`}>
+          <span>{experience === 'race' ? '↑ Acelerar · ↓ Frenar / Reversa · Espacio Freno · ← → Dirección' : experience === 'replay' ? 'Director TV · repetición real' : 'Comparación automática'}</span>
+          <span className="text-slate-600">•</span>
+          <span>Arrastrá: cámara libre</span>
         </div>
 
         {/* Floating Diagnostics Panel (Toggleable) */}
@@ -2257,12 +2964,12 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
         )}
 
         {/* Floating Mini Camera Selector (Top Right of Canvas) */}
-        <div className="dc100-race-camera-desktop absolute top-3 right-3 z-20 flex items-center gap-1 bg-slate-950/85 backdrop-blur-md p-1 rounded-xl border border-slate-800/80 shadow-xl flex-wrap">
+        <div className="dc100-race-camera-desktop absolute top-3 right-3 z-20 hidden lg:flex items-center gap-1 bg-slate-950/85 backdrop-blur-md p-1 rounded-xl border border-slate-800/80 shadow-xl select-none">
           {experience === 'race' && <button
             onClick={() => setCameraMode('arcade')}
             className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-mono font-semibold transition-all ${cameraMode === 'arcade' ? 'bg-sky-500 text-slate-950 shadow-md shadow-sky-500/20' : 'text-slate-300 hover:text-white hover:bg-slate-800/60'}`}
             title="Cámara arcade baja y dinámica, sigue a tu auto">
-            <Video className="w-3.5 h-3.5" /><span>Arcade NFS</span>
+            <Video className="w-3.5 h-3.5" /><span>Arcade</span>
           </button>}
           <button
             onClick={() => setCameraMode('trasera')}
@@ -2274,7 +2981,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             title="Cámara de conducción: tercera persona detrás del vehículo seleccionado"
           >
             <Video className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">{experience === 'race' ? 'Mi auto · 3ª persona' : 'Persecución'}</span>
+            <span>{experience === 'race' ? 'Mi auto' : 'Persecución'}</span>
           </button>
 
           <button
@@ -2287,7 +2994,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             title="Cámara 2: Lateral Transmisión Deportiva (Trackside TV)"
           >
             <Tv className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">TV Lateral</span>
+            <span>TV</span>
           </button>
 
           <button
@@ -2300,7 +3007,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             title="Cámara 3: Cenital 3D (Overhead perspective)"
           >
             <Compass className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Cenital 3D</span>
+            <span>Cenital</span>
           </button>
 
           <button
@@ -2313,7 +3020,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
             title="Cámara libre: arrastrar con mouse/mousepad, zoom con dos dedos"
           >
             <MousePointer2 className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Libre</span>
+            <span>Libre</span>
           </button>
 
           {experience === 'replay' && (<>
@@ -2346,32 +3053,116 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
           </>)}
         </div>
 
-        {/* Loading Indicator for 3D GLB Model */}
-        {isGlbLoading && (
-          <div className="absolute top-14 left-3 z-30 flex items-center gap-2 bg-slate-950/90 backdrop-blur-md border border-sky-500/40 px-3 py-1.5 rounded-xl shadow-xl font-mono text-xs text-sky-400 animate-pulse">
-            <span className="w-2 h-2 rounded-full bg-sky-400 animate-ping" />
-            <span>Cargando Tracker 3D segmentada (39,5 MB)...</span>
-          </div>
-        )}
-        {glbLoadError && (
-          <div className="absolute top-14 left-3 z-30 flex items-center gap-2 bg-red-950/90 backdrop-blur-md border border-red-500/40 px-3 py-1.5 rounded-xl shadow-xl font-mono text-xs text-red-400">
-            <span>⚠️ {glbLoadError}</span>
+        {/* Full-screen Arcade Preloader Gate */}
+        {isPreloading && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[#050914]/95 backdrop-blur-xl px-4 py-6 select-none transition-all duration-300">
+            <div className="w-full max-w-xl mx-auto flex flex-col items-center text-center">
+              {/* Badge */}
+              <div className="flex items-center gap-2 px-3 py-1 rounded-full border border-cyan-400/30 bg-cyan-500/10 text-cyan-300 font-mono text-xs uppercase tracking-widest mb-3">
+                <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping" />
+                <span>DATACAR ARENA · PREPARANDO PARRILLA</span>
+              </div>
+
+              {/* Title & Track */}
+              <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white uppercase mb-1">
+                {track.name}
+              </h2>
+              <p className="text-xs sm:text-sm font-mono text-slate-400 mb-6">
+                {track.distanceMeters} METROS · {track.subtitle}
+              </p>
+
+              {/* Competitors List */}
+              <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
+                {vehicles.map((v, i) => {
+                  const isPlayer = v.id === (playerVehicleId || vehicles[0]?.id);
+                  const isModelReady = i < loadedVehicleModels;
+                  return (
+                    <div
+                      key={v.id}
+                      className={`relative rounded-xl border p-3 flex flex-col items-center text-center transition-all ${
+                        isPlayer
+                          ? 'border-amber-400/60 bg-amber-500/10 shadow-[0_0_20px_rgba(245,158,11,0.15)]'
+                          : 'border-slate-800 bg-slate-900/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1.5">
+                        <span className="w-2.5 h-2.5 rounded-full ring-2 ring-white/20" style={{ backgroundColor: v.color }} />
+                        <span className="text-[10px] font-black uppercase tracking-wider text-slate-300">
+                          {isPlayer ? 'TU AUTO' : `RIVAL ${i}`}
+                        </span>
+                      </div>
+                      <div className="text-sm font-black text-white uppercase tracking-tight">
+                        {v.brand} {v.name}
+                      </div>
+                      <div className="text-[10px] font-mono text-slate-400 mt-0.5">
+                        {v.powerHp} HP · {v.torqueNm} Nm
+                      </div>
+                      <div className="mt-3 flex items-center gap-1 text-[10px] font-bold font-mono">
+                        {isModelReady ? (
+                          <span className="text-emerald-400 flex items-center gap-1 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md">
+                            ✓ LISTO EN PISTA
+                          </span>
+                        ) : (
+                          <span className="text-sky-400 flex items-center gap-1 bg-sky-500/10 border border-sky-500/30 px-2 py-0.5 rounded-md animate-pulse">
+                            <span className="w-1.5 h-1.5 rounded-full bg-sky-400 animate-ping" />
+                            CARGANDO 3D...
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Progress Bar */}
+              <div className="w-full max-w-md bg-slate-900/80 rounded-full h-2.5 border border-slate-700/60 overflow-hidden mb-2">
+                <div
+                  className="h-full bg-gradient-to-r from-cyan-500 via-sky-400 to-amber-400 transition-all duration-300 rounded-full shadow-[0_0_12px_rgba(6,182,212,0.8)]"
+                  style={{
+                    width: `${
+                      requiredVehicleModels > 0
+                        ? Math.min(100, Math.round((loadedVehicleModels / requiredVehicleModels) * 100))
+                        : 100
+                    }%`,
+                  }}
+                />
+              </div>
+
+              {/* Status Message */}
+              <div className="text-xs font-mono text-slate-400">
+                {loadedVehicleModels >= requiredVehicleModels
+                  ? '¡Vehículos en pista! Iniciando largada...'
+                  : `Cargando y calibrando modelos 3D (${loadedVehicleModels}/${requiredVehicleModels})...`}
+              </div>
+
+              {glbLoadError && (
+                <div className="mt-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-1 rounded-lg">
+                  {glbLoadError} (utilizando auto-fallback)
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Live Race Positions Pill (Top Left of Canvas) */}
-        <div className="dc100-race-ranking absolute top-3 left-3 z-20 flex flex-col gap-1 bg-slate-950/85 backdrop-blur-md p-2 rounded-xl border border-slate-800/80 shadow-xl font-mono text-[11px] pointer-events-none">
+        {/* Live Race Positions Pill (Cleanly stacked below Minimap on desktop) */}
+        <div className="dc100-race-ranking absolute top-[168px] left-3 z-20 hidden md:flex flex-col gap-1 bg-slate-950/85 backdrop-blur-md p-2 rounded-xl border border-slate-800/80 shadow-xl font-mono text-[11px] pointer-events-none select-none max-w-[280px]">
           {vehicles.map((v) => {
             const st = interactiveMode && liveVehicleStates[v.id]
               ? liveVehicleStates[v.id]
               : getInterpolatedVehicleState(v.id, currentTimeSec);
             return (
               <div key={v.id} className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full" style={{ backgroundColor: v.color }} />
+                <span className="w-2.5 h-2.5 rounded-full ring-1 ring-white/30" style={{ backgroundColor: v.color }} />
                 <span className="text-white font-bold">{v.name.slice(0, 10)}</span>
-                <span className="text-[9px] px-1 py-0.2 rounded bg-sky-500/25 text-sky-300 border border-sky-400/40 font-bold">
-                  3D GLB
-                </span>
+                {v.id === (playerVehicleId || vehicles[0]?.id) ? (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/25 text-amber-300 border border-amber-400/40 font-black">
+                    TU AUTO
+                  </span>
+                ) : (
+                  <span className="text-[9px] px-1 py-0.2 rounded bg-sky-500/25 text-sky-300 border border-sky-400/40 font-bold">
+                    3D GLB
+                  </span>
+                )}
                 <span className="text-sky-400 tabular-nums">{st.speedKmh.toFixed(0)} km/h</span>
                 <span className="text-slate-400 tabular-nums">{st.distance.toFixed(0)}m</span>
               </div>
@@ -2420,12 +3211,17 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
                     if (interactiveMode) {
                       // Recrear el motor dentro del loop; conservar las posiciones de los obstáculos.
                       physicsRef.current = new InteractiveRacePhysics(vehicles, track,
-                        stateRef.current.selectedVehicleId, false);
+                        stateRef.current.selectedVehicleId, false, {
+                          urbanTrafficRules: experience === 'race',
+                        });
                       const rebuilt = physicsRef.current;
+                      rebuilt.setWeather(weatherModeRef.current);
                       rebuilt.restoreHazards(raceHazardsSnapshotRef.current);
                       finalResultsRef.current = null;
                       setRaceEvent('');
                       setRaceInsight(null);
+                      setSeatbeltBuckled(false);
+                      setTrafficNotice(null);
                       setLiveVehicleStates({});
                       resetVisualRaceRef.current?.();
                     }
@@ -2482,7 +3278,7 @@ export const Race3DPerspectiveView: React.FC<Race3DPerspectiveViewProps> = ({
                 <input
                   type="range"
                   min="0"
-                  max={interactiveMode ? (track.cityCircuitId ? 420 : 180) : maxRaceTimeSec}
+                  max={interactiveMode ? (track.cityCircuitId ? 420 : 180) * Math.max(1, track.laps ?? 1) : maxRaceTimeSec}
                   step="0.01"
                   disabled={interactiveMode}
                   value={currentTimeSec}

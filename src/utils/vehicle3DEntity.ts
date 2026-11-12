@@ -5,7 +5,8 @@ import {
   getVehicle3DConfig, 
   loadVehicleGLTF, 
   createCalibratedVehicle3DInstance,
-  Vehicle3DConfig
+  Vehicle3DConfig,
+  RESCUE_FALLBACK_GLB_URL,
 } from './vehicle3DModelLoader';
 import { createContactShadowTexture } from './race3dTextures';
 import { createVehicleWheelRig, VehicleWheelRig } from './vehicleWheelRig';
@@ -49,19 +50,19 @@ export interface VehicleEntityRunner {
  */
 function createNameplateTexture(name: string, colorHex: string, isProvisional: boolean): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
+  canvas.width = 640;
   canvas.height = 128;
   const ctx = canvas.getContext('2d');
   if (!ctx) return new THREE.CanvasTexture(canvas);
 
-  ctx.clearRect(0, 0, 512, 128);
+  ctx.clearRect(0, 0, 640, 128);
 
   // Contenedor semitransparente con borde del color del vehículo
   ctx.fillStyle = 'rgba(10, 15, 29, 0.88)';
   ctx.strokeStyle = colorHex;
   ctx.lineWidth = 4;
   
-  const x = 16, y = 16, w = 480, h = 96, r = 48;
+  const x = 16, y = 16, w = 608, h = 96, r = 48;
   ctx.beginPath();
   ctx.roundRect(x, y, w, h, r);
   ctx.fill();
@@ -73,17 +74,25 @@ function createNameplateTexture(name: string, colorHex: string, isProvisional: b
   ctx.arc(60, 64, 16, 0, Math.PI * 2);
   ctx.fill();
 
-  // Nombre del vehículo
-  ctx.font = 'bold 34px "Plus Jakarta Sans", sans-serif';
+  // Nombre del vehículo con ajuste dinámico para que quepa completo
+  const text = name.toUpperCase();
+  let fontSize = 32;
+  ctx.font = `bold ${fontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
+  const maxAllowedWidth = isProvisional ? 390 : 490;
+  while (ctx.measureText(text).width > maxAllowedWidth && fontSize > 18) {
+    fontSize -= 2;
+    ctx.font = `bold ${fontSize}px "Plus Jakarta Sans", system-ui, sans-serif`;
+  }
+
   ctx.fillStyle = '#ffffff';
   ctx.textBaseline = 'middle';
-  ctx.fillText(name.toUpperCase(), 90, 64);
+  ctx.fillText(text, 90, 64);
 
   // Badge discreto si es 3D provisional
   if (isProvisional) {
     ctx.font = 'bold 18px "JetBrains Mono", monospace';
     ctx.fillStyle = colorHex;
-    ctx.fillText('3D TEMP', 365, 64);
+    ctx.fillText('3D TEMP', 500, 64);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
@@ -186,6 +195,7 @@ export class Vehicle3DGLBEntity implements VehicleEntityRunner {
   private headlightRoadPool: THREE.Mesh;
   private headlightRoadTexture: THREE.CanvasTexture;
   private isLoaded: boolean = false;
+  private envMap?: THREE.Texture | null;
 
   constructor(
     vehicle: Vehicle, 
@@ -193,10 +203,12 @@ export class Vehicle3DGLBEntity implements VehicleEntityRunner {
     totalLanes: number, 
     config: Vehicle3DConfig,
     onLoaded?: () => void,
-    onError?: (err: unknown) => void
+    onError?: (err: unknown) => void,
+    envMap?: THREE.Texture | null
   ) {
     this.vehicle = vehicle;
     this.config = config;
+    this.envMap = envMap;
 
     // 1. VehicleRoot: controla las coordenadas físicas mundiales
     this.group = new THREE.Group();
@@ -251,7 +263,7 @@ export class Vehicle3DGLBEntity implements VehicleEntityRunner {
       depthTest: true,
     });
     this.nameplateSprite = new THREE.Sprite(nameplateMat);
-    this.nameplateSprite.scale.set(2.4, 0.6, 1);
+    this.nameplateSprite.scale.set(2.8, 0.56, 1);
     this.nameplateSprite.position.set(0, 2.25, 0);
     this.group.add(this.nameplateSprite);
 
@@ -259,6 +271,33 @@ export class Vehicle3DGLBEntity implements VehicleEntityRunner {
     this.brakeLight = new THREE.PointLight('#ef4444', 0, 8);
     this.brakeLight.position.set(0, 0.95, -2.15);
     this.effectsGroup.add(this.brakeLight);
+
+    // 6b. Si es modelo 3D provisional, cubrir el logo de Chevrolet en el maletero con una placa estética de la marca
+    if (config.isProvisional3D && config.modelId !== 'chevrolet-tracker-lite') {
+      const badgeCanvas = document.createElement('canvas');
+      badgeCanvas.width = 256;
+      badgeCanvas.height = 64;
+      const bctx = badgeCanvas.getContext('2d');
+      if (bctx) {
+        bctx.fillStyle = '#0a0f1d';
+        bctx.fillRect(0, 0, 256, 64);
+        bctx.strokeStyle = config.brandColor;
+        bctx.lineWidth = 6;
+        bctx.strokeRect(3, 3, 250, 58);
+        bctx.fillStyle = '#ffffff';
+        bctx.font = 'bold 28px sans-serif';
+        bctx.textAlign = 'center';
+        bctx.textBaseline = 'middle';
+        bctx.fillText(vehicle.brand.toUpperCase(), 128, 34);
+      }
+      const badgeTex = new THREE.CanvasTexture(badgeCanvas);
+      const badgeGeo = new THREE.PlaneGeometry(0.32, 0.09);
+      const badgeMat = new THREE.MeshBasicMaterial({ map: badgeTex, side: THREE.DoubleSide });
+      const badgeMesh = new THREE.Mesh(badgeGeo, badgeMat);
+      badgeMesh.position.set(0, 0.88, -2.16);
+      badgeMesh.rotation.y = Math.PI;
+      this.effectsGroup.add(badgeMesh);
+    }
 
     // 7. Faros con intensidad controlada: la V5.8 dibujaba cajas blancas
     // y un SpotLight de intensidad 120 que dejaba manchas quemadas en la pista.
@@ -328,24 +367,62 @@ export class Vehicle3DGLBEntity implements VehicleEntityRunner {
     this.group.add(this.headlightRoadPool);
     this.setHeadlights(true, false);
 
-    // 8. Cargar modelo 3D GLB asíncronamente desde la caché única
-    loadVehicleGLTF(config.glbUrl)
-      .then((gltf) => {
-        this.modelInstance = createCalibratedVehicle3DInstance(config, gltf);
-        // Crear pivotes sobre cada CLON (no sobre la caché compartida).
-        // El nodo hijo es la escena local con escala y rotación calibradas.
-        const calibratedModel = this.modelInstance.children[0] as THREE.Group;
-        this.wheelRig = createVehicleWheelRig(calibratedModel, config.scale);
-        this.wheelRig?.setDistanceMeters(this.lastDistanceMeters);
-        this.wheelRig?.setSteeringRadians(this.currentSteeringAngle, 1);
-        this.effectsGroup.add(this.modelInstance);
-        this.isLoaded = true;
-        if (onLoaded) onLoaded();
-      })
-      .catch((err) => {
-        console.error(`[Vehicle3DGLBEntity] Error instanciando GLB para ${vehicle.name}:`, err);
-        if (onError) onError(err);
-      });
+    // 8. Cargar modelo 3D GLB con sistema de rescate automático (auto-fallback)
+    const targetLengthMeters = (vehicle.dimensions?.lengthMm || 4300) / 1000;
+    const rescueConfig: Vehicle3DConfig = {
+      ...config,
+      glbUrl: config.fallbackGlbUrl || RESCUE_FALLBACK_GLB_URL,
+      targetLengthMeters,
+      scale: targetLengthMeters / 0.12,
+      rotationY: Math.PI / 2,
+      verticalOffset: 0,
+      isProvisional3D: true,
+    };
+
+    const attachModel = (gltf: any, activeConfig: Vehicle3DConfig) => {
+      this.modelInstance = createCalibratedVehicle3DInstance(activeConfig, gltf, this.envMap);
+      const calibratedModel = this.modelInstance.children[0] as THREE.Group;
+      this.wheelRig = createVehicleWheelRig(calibratedModel, calibratedModel.scale.x);
+      this.wheelRig?.setDistanceMeters(this.lastDistanceMeters);
+      this.wheelRig?.setSteeringRadians(this.currentSteeringAngle, 1);
+      this.effectsGroup.add(this.modelInstance);
+      this.isLoaded = true;
+      if (onLoaded) onLoaded();
+    };
+
+    const candidateUrls = config.candidateUrls && config.candidateUrls.length > 0
+      ? config.candidateUrls
+      : [config.glbUrl];
+
+    const tryLoadSequence = async () => {
+      for (const url of candidateUrls) {
+        try {
+          const gltf = await loadVehicleGLTF(url);
+          attachModel(gltf, { ...config, glbUrl: url, isProvisional3D: false });
+          return;
+        } catch {
+          // Continuar con el siguiente candidato si el archivo no existe aún en disco
+        }
+      }
+
+      // Si aún no se subió el modelo 3D dedicado, conmutar al modelo provisional de rescate
+      try {
+        const rescueGltf = await loadVehicleGLTF(rescueConfig.glbUrl);
+        attachModel(rescueGltf, rescueConfig);
+      } catch {
+        try {
+          const secGltf = await loadVehicleGLTF(RESCUE_FALLBACK_GLB_URL);
+          attachModel(secGltf, { ...rescueConfig, glbUrl: RESCUE_FALLBACK_GLB_URL });
+        } catch {
+          const emergencyMesh = createEmergencyChassisMesh(vehicle);
+          this.effectsGroup.add(emergencyMesh);
+          this.isLoaded = true;
+          if (onLoaded) onLoaded();
+        }
+      }
+    };
+
+    tryLoadSequence();
   }
 
   public updateState(
@@ -467,11 +544,19 @@ export function createVehicleEntity(
   laneIndex: number,
   totalLanes: number,
   onGLBLoaded?: () => void,
-  onGLBError?: (err: unknown) => void
+  onGLBError?: (err: unknown) => void,
+  envMap?: THREE.Texture | null
 ): VehicleEntityRunner {
   const config = getVehicle3DConfig(vehicle.id);
+  const targetLengthMeters = (vehicle.dimensions?.lengthMm || 4300) / 1000;
   if (config) {
-    return new Vehicle3DGLBEntity(vehicle, laneIndex, totalLanes, config, onGLBLoaded, onGLBError);
+    const effectiveConfig: Vehicle3DConfig = {
+      ...config,
+      brandColor: vehicle.color || config.brandColor,
+      targetLengthMeters,
+      scale: targetLengthMeters / 0.12,
+    };
+    return new Vehicle3DGLBEntity(vehicle, laneIndex, totalLanes, effectiveConfig, onGLBLoaded, onGLBError, envMap);
   }
 
   // Fallback seguro en caso de vehículo no registrado
@@ -481,11 +566,70 @@ export function createVehicleEntity(
     identificationName: vehicle.name,
     brandColor: vehicle.color || '#3b82f6',
     glbUrl: '/models/tracker-rs-wheels.glb',
-    scale: 4.27 / 0.12,
+    targetLengthMeters,
+    scale: targetLengthMeters / 0.12,
     rotationY: Math.PI / 2,
     verticalOffset: 0,
     isUnifiedMesh: false,
     isProvisional3D: true,
   };
-  return new Vehicle3DGLBEntity(vehicle, laneIndex, totalLanes, defaultConfig, onGLBLoaded, onGLBError);
+  return new Vehicle3DGLBEntity(vehicle, laneIndex, totalLanes, defaultConfig, onGLBLoaded, onGLBError, envMap);
+}
+
+/**
+ * Carrocería procedural de emergencia:
+ * Garantiza que incluso ante fallas catastróficas de red o GLB, el auto sea visible
+ * en 3D con proporciones exactas y la carrera arranque sin quedarse congelada.
+ */
+function createEmergencyChassisMesh(vehicle: Vehicle): THREE.Group {
+  const group = new THREE.Group();
+  group.name = `emergency_chassis_${vehicle.id}`;
+
+  const lengthM = (vehicle.dimensions?.lengthMm || 4300) / 1000;
+  const widthM = (vehicle.dimensions?.widthMm || 1800) / 1000;
+  const heightM = (vehicle.dimensions?.heightMm || 1600) / 1000;
+
+  const bodyGeo = new THREE.BoxGeometry(widthM * 0.92, heightM * 0.45, lengthM * 0.95);
+  const color = new THREE.Color(vehicle.color || '#00e5ff');
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color,
+    roughness: 0.25,
+    metalness: 0.65,
+  });
+  const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+  bodyMesh.position.y = heightM * 0.4;
+  bodyMesh.castShadow = true;
+  bodyMesh.receiveShadow = true;
+  group.add(bodyMesh);
+
+  const cabinGeo = new THREE.BoxGeometry(widthM * 0.82, heightM * 0.38, lengthM * 0.52);
+  const cabinMat = new THREE.MeshStandardMaterial({
+    color: 0x0a101f,
+    roughness: 0.1,
+    metalness: 0.9,
+  });
+  const cabinMesh = new THREE.Mesh(cabinGeo, cabinMat);
+  cabinMesh.position.set(0, heightM * 0.72, -lengthM * 0.05);
+  cabinMesh.castShadow = true;
+  group.add(cabinMesh);
+
+  const wheelRadius = 0.32;
+  const wheelWidth = 0.22;
+  const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, wheelWidth, 16);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.85 });
+  const wheelPositions = [
+    [-widthM * 0.46, wheelRadius, lengthM * 0.30],
+    [widthM * 0.46, wheelRadius, lengthM * 0.30],
+    [-widthM * 0.46, wheelRadius, -lengthM * 0.30],
+    [widthM * 0.46, wheelRadius, -lengthM * 0.30],
+  ];
+  wheelPositions.forEach(([x, y, z]) => {
+    const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+    wheel.rotation.z = Math.PI / 2;
+    wheel.position.set(x, y, z);
+    wheel.castShadow = true;
+    group.add(wheel);
+  });
+
+  return group;
 }

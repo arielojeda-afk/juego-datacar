@@ -298,6 +298,90 @@ class EngineSoundSynthesizer {
     grit.onended = () => { grit.disconnect(); filter.disconnect(); gritGain.disconnect(); };
   }
 
+  private lastSplashAt = -Infinity;
+  private lastWarningToneAt = -Infinity;
+
+  /** Salpicadura de agua sobre bache/charco mojado: spray agudo + chapoteo medio. */
+  playWaterSplash(strength = .7) {
+    if (!this.ctx || !this.master || this.muted) return;
+    const t = this.ctx.currentTime;
+    if (t - this.lastSplashAt < .22) return;
+    this.lastSplashAt = t;
+    const v = clamp(strength, .2, 1);
+    const dur = .34 + v * .18;
+    const length = Math.max(1, Math.floor(this.ctx.sampleRate * dur));
+    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+    const samples = buffer.getChannelData(0);
+    for (let i = 0; i < length; i++) {
+      const u = i / length;
+      const env = Math.sin(Math.min(1, u * 9) * Math.PI * .5) * Math.exp(-u * 4.4);
+      samples[i] = (Math.random() * 2 - 1) * env;
+    }
+    const spray = this.ctx.createBufferSource();
+    spray.buffer = buffer;
+    const band = this.ctx.createBiquadFilter();
+    band.type = 'bandpass';
+    band.frequency.setValueAtTime(1650 + v * 900, t);
+    band.frequency.exponentialRampToValueAtTime(680, t + dur);
+    band.Q.value = .95;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(.28 * v, t);
+    gain.gain.exponentialRampToValueAtTime(.001, t + dur);
+    spray.connect(band);
+    band.connect(gain);
+    gain.connect(this.master);
+    spray.start(t);
+    spray.stop(t + dur + .02);
+    spray.onended = () => { spray.disconnect(); band.disconnect(); gain.disconnect(); };
+  }
+
+  /** Aviso acústico vial (semáforo en rojo, exceso de velocidad, cinturón o punto ciego). */
+  playTrafficWarningTone(urgent = false) {
+    if (!this.ctx || !this.master || this.muted) return;
+    const t = this.ctx.currentTime;
+    if (t - this.lastWarningToneAt < (urgent ? .45 : .85)) return;
+    this.lastWarningToneAt = t;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = urgent ? 'sawtooth' : 'triangle';
+    const f1 = urgent ? 880 : 660;
+    const f2 = urgent ? 620 : 820;
+    osc.frequency.setValueAtTime(f1, t);
+    osc.frequency.setValueAtTime(f2, t + .09);
+    gain.gain.setValueAtTime(.0001, t);
+    gain.gain.linearRampToValueAtTime(urgent ? .12 : .085, t + .015);
+    gain.gain.setValueAtTime(urgent ? .11 : .075, t + .16);
+    gain.gain.exponentialRampToValueAtTime(.0001, t + .24);
+    osc.connect(gain);
+    gain.connect(this.master);
+    osc.start(t);
+    osc.stop(t + .25);
+    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+  }
+
+  /** Clic mecánico al abrochar el cinturón de seguridad. */
+  playSeatbeltClick() {
+    if (!this.ctx || !this.master || this.muted) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1420, t);
+    osc.frequency.exponentialRampToValueAtTime(520, t + .045);
+    osc.frequency.setValueAtTime(1880, t + .055);
+    osc.frequency.exponentialRampToValueAtTime(760, t + .10);
+    gain.gain.setValueAtTime(.0001, t);
+    gain.gain.linearRampToValueAtTime(.14, t + .006);
+    gain.gain.exponentialRampToValueAtTime(.02, t + .048);
+    gain.gain.linearRampToValueAtTime(.15, t + .06);
+    gain.gain.exponentialRampToValueAtTime(.0001, t + .115);
+    osc.connect(gain);
+    gain.connect(this.master);
+    osc.start(t);
+    osc.stop(t + .12);
+    osc.onended = () => { osc.disconnect(); gain.disconnect(); };
+  }
+
   stopAll(fadeSeconds = 0.15) {
     this.stopCountdownTones();
     const now = this.ctx?.currentTime ?? 0;

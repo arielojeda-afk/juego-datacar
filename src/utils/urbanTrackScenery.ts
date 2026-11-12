@@ -14,7 +14,7 @@ export function createUrbanTrackScenery(
 ): THREE.Group {
   const group = new THREE.Group();
   group.name = 'asuncion_roadside_environment';
-  const end = Math.min(trackLength, isCityCircuit ? 3700 : 1600);
+  const end = Math.min(trackLength, isCityCircuit ? 7800 : 1600);
   const mid = end / 2 - 20;
   const halfRoad = roadWidth / 2;
   const wet = profile === 'flood';

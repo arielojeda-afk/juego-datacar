@@ -63,7 +63,7 @@
   .dc-mobile-controls { display: flex; position: absolute; z-index: 35; left: 0; right: 0; bottom: max(10px, env(safe-area-inset-bottom)); padding: 0 max(15px, env(safe-area-inset-right)) 0 max(15px, env(safe-area-inset-left)); justify-content: space-between; align-items: end; pointer-events: none; touch-action: none; }
   .dc-touch-steering, .dc-touch-pedals { display: flex; gap: clamp(6px, 1.2vw, 14px); align-items: end; pointer-events: auto; }
   .dc-touch-button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; width: clamp(55px, 9vw, 82px); height: clamp(55px, 9vw, 82px); padding: 4px; border-radius: 19px; border: 2px solid rgba(162,224,245,.58); background: rgba(4,16,31,.67); box-shadow: inset 0 1px 0 rgba(255,255,255,.15), 0 5px 20px rgba(0,0,0,.35); color: #eefaff; font-weight: 800; font-size: 8px; text-align: center; -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; }
-  .dc-touch-button span { line-height: 1.1; }
+  .dc-touch-button span { display: none !important; font-size: 0 !important; visibility: hidden !important; }
   .dc-touch-button.dc-touch-active { background: rgba(6,182,212,.82); border-color: white; transform: scale(.96); }
   .dc-touch-throttle { border-color: rgba(52,211,153,.78); color: #a7f3d0; height: clamp(68px, 12vw, 100px); }
   .dc-touch-brake { border-color: rgba(251,113,133,.8); color: #fecdd3; }
@@ -379,6 +379,14 @@
 @media (pointer:coarse) and (max-width:1100px) {
   .dc99-race-stage .dc-mobile-controls {display:flex!important;touch-action:none!important;}
   .dc99-race-stage .dc-touch-button {touch-action:none!important;-webkit-user-select:none!important;user-select:none!important;}
+  .dc99-race-stage .dc-mockup5-minimap {display:flex!important;position:absolute!important;left:max(8px,env(safe-area-inset-left))!important;top:max(8px,env(safe-area-inset-top))!important;z-index:35!important;transform:none!important;}
+  .dc99-race-stage .dc-mockup5-center-header {display:flex!important;position:absolute!important;top:max(6px,env(safe-area-inset-top))!important;left:50%!important;transform:translateX(-50%)!important;z-index:35!important;}
+  .dc99-race-stage .dc-mockup5-cluster-wrapper {display:flex!important;position:absolute!important;right:max(8px,env(safe-area-inset-right))!important;top:max(6px,env(safe-area-inset-top))!important;z-index:35!important;}
+  .dc99-race-stage .dc-mockup5-driving-iq {display:flex!important;position:absolute!important;bottom:max(12px,env(safe-area-inset-bottom))!important;left:50%!important;transform:translateX(-50%)!important;z-index:35!important;}
+  .dc99-race-stage .dc-mobile-controls button.dc-touch-rhomboid {width:clamp(60px,8.5vw,76px)!important;height:clamp(52px,7.5vw,64px)!important;border-radius:16px!important;transform:skewX(-12deg)!important;}
+  .dc99-race-stage .dc-mobile-controls button.dc-touch-gold-throttle {width:clamp(60px,8.5vw,72px)!important;height:clamp(96px,13.5vw,112px)!important;border-radius:18px!important;border-color:#ffb800!important;background:rgba(26,18,2,0.85)!important;}
+  .dc99-race-stage .dc-mobile-controls button.dc-touch-brake-pedal,
+  .dc99-race-stage .dc-mobile-controls button.dc-touch-reverse-pedal {width:clamp(54px,7.5vw,66px)!important;height:clamp(44px,6vw,50px)!important;border-radius:12px!important;}
 }
 
 /* V11.2 · La pista permanece visible detrás del botón START mientras termina de montarse. */
